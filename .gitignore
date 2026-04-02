@@ -1,0 +1,11 @@
+.env
+.venv/
+data/bronze/
+data/silver/
+data/gold/
+data/models/
+data/*.csv*
+data/.DS_Store
+.DS_Store
+__pycache__/
+*.pyc
