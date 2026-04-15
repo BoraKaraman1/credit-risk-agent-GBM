@@ -6,7 +6,8 @@ Designed to be invoked by Claude Code as a subagent.
 """
 
 import json
-import pickle
+import logging
+import joblib
 import sys
 import numpy as np
 import pandas as pd
@@ -15,6 +16,16 @@ from datetime import datetime, timezone
 
 from agents.config import MODELS_DIR, GOLD_DIR
 from agents.drift_monitor import compute_psi
+
+logger = logging.getLogger(__name__)
+
+
+def _model_path(directory):
+    """Resolve model path with backward compat."""
+    p = directory / "model.joblib"
+    if p.exists():
+        return p
+    return directory / "model.pkl"
 
 
 def run(reason="manual"):
@@ -33,32 +44,30 @@ def run(reason="manual"):
     Returns:
         Report dict with champion vs challenger comparison.
     """
-    print(f"[RETRAIN] Starting retraining. Reason: {reason}")
+    logger.info(f"Starting retraining. Reason: {reason}")
 
     # Import train module
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from pipeline.train import load_gold_data, train_model, evaluate_model, save_model
+    from pipeline.train import load_gold_data, evaluate_model, save_model
 
     # Load data
-    print("[RETRAIN] Loading Gold data ...")
+    logger.info("Loading Gold data ...")
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = load_gold_data()
 
     # Load current champion for comparison
     champion_meta_path = MODELS_DIR / "champion" / "model_metadata.json"
-    champion_model_path = MODELS_DIR / "champion" / "model.pkl"
+    champion_model_path = _model_path(MODELS_DIR / "champion")
 
     champion_meta = None
     champion_model = None
     if champion_meta_path.exists():
         with open(champion_meta_path) as f:
             champion_meta = json.load(f)
-        with open(champion_model_path, "rb") as f:
-            champion_model = pickle.load(f)
-        print(f"[RETRAIN] Current champion: {champion_meta['version']}")
+        champion_model = joblib.load(champion_model_path)
+        logger.info(f"Current champion: {champion_meta['version']}")
 
     # Train challenger
-    print("[RETRAIN] Training challenger model ...")
-    from pipeline.train import train_model as _train, evaluate_model as _eval
+    logger.info("Training challenger model ...")
 
     from sklearn.ensemble import HistGradientBoostingClassifier
 
@@ -85,7 +94,7 @@ def run(reason="manual"):
     challenger_model = HistGradientBoostingClassifier(**challenger_params)
     challenger_model.fit(combined_X, combined_y)
 
-    print(f"[RETRAIN] Challenger trained. Iterations: {challenger_model.n_iter_}")
+    logger.info(f"Challenger trained. Iterations: {challenger_model.n_iter_}")
 
     # Evaluate both on test set
     challenger_scores = challenger_model.predict_proba(X_test)[:, 1]
@@ -163,14 +172,14 @@ def run(reason="manual"):
         "promote_command": "python -c \"import shutil; shutil.copytree('data/models/challenger', 'data/models/champion', dirs_exist_ok=True)\"",
     }
 
-    print(f"\n[RETRAIN] === Comparison ===")
+    logger.info("=== Comparison ===")
     if champion_test_metrics:
-        print(f"  Champion ({champion_meta['version']}): AUC={champion_test_metrics['auc']}  KS={champion_test_metrics['ks']}")
-    print(f"  Challenger ({version}): AUC={challenger_metrics['test']['auc']}  KS={challenger_metrics['test']['ks']}")
+        logger.info(f"  Champion ({champion_meta['version']}): AUC={champion_test_metrics['auc']}  KS={champion_test_metrics['ks']}")
+    logger.info(f"  Challenger ({version}): AUC={challenger_metrics['test']['auc']}  KS={challenger_metrics['test']['ks']}")
     if score_psi is not None:
-        print(f"  Score PSI between models: {score_psi}")
-    print(f"  Recommendation: {report['recommendation']}")
-    print(f"\n[RETRAIN] Challenger saved. Awaiting human review for promotion.")
+        logger.info(f"  Score PSI between models: {score_psi}")
+    logger.info(f"  Recommendation: {report['recommendation']}")
+    logger.info("Challenger saved. Awaiting human review for promotion.")
 
     return report
 
@@ -198,6 +207,11 @@ def _make_recommendation(challenger, champion, score_psi):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     reason = sys.argv[1] if len(sys.argv) > 1 else "manual"
     report = run(reason=reason)
     print(json.dumps(report, indent=2))

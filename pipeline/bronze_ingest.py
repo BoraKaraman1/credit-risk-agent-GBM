@@ -4,9 +4,12 @@ Reads raw CSV.gz files and writes them as Parquet with metadata columns.
 Bronze is immutable — data lands exactly as received, never mutated.
 """
 
+import logging
 import pandas as pd
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 BRONZE_DIR = DATA_DIR / "bronze"
@@ -18,10 +21,10 @@ def ingest_accepted():
     dest = BRONZE_DIR / "accepted_2007_2018.parquet"
 
     if dest.exists():
-        print(f"[SKIP] {dest} already exists. Bronze is immutable.")
+        logger.info(f"{dest} already exists. Bronze is immutable — skipping.")
         return
 
-    print(f"[BRONZE] Reading {source} ...")
+    logger.info(f"Reading {source} ...")
     df = pd.read_csv(source, low_memory=False)
 
     # Drop the two completely empty trailing rows that Lending Club files sometimes have
@@ -31,9 +34,17 @@ def ingest_accepted():
     df["ingested_at"] = datetime.now(timezone.utc).isoformat()
     df["source_file"] = source.name
 
-    print(f"[BRONZE] Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
+    logger.info(f"Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
     df.to_parquet(dest, index=False, engine="pyarrow")
-    print(f"[BRONZE] Accepted loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
+    logger.info(f"Accepted loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
+
+    try:
+        from pipeline.data_quality import validate_bronze
+        result = validate_bronze(df, source_name="accepted")
+        if not result["success"]:
+            logger.warning(f"Bronze validation failed: {result}")
+    except ImportError:
+        pass
 
 
 def ingest_rejected():
@@ -42,19 +53,27 @@ def ingest_rejected():
     dest = BRONZE_DIR / "rejected_2007_2018.parquet"
 
     if dest.exists():
-        print(f"[SKIP] {dest} already exists. Bronze is immutable.")
+        logger.info(f"{dest} already exists. Bronze is immutable — skipping.")
         return
 
-    print(f"[BRONZE] Reading {source} ...")
+    logger.info(f"Reading {source} ...")
     df = pd.read_csv(source, low_memory=False)
     df = df.dropna(how="all")
 
     df["ingested_at"] = datetime.now(timezone.utc).isoformat()
     df["source_file"] = source.name
 
-    print(f"[BRONZE] Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
+    logger.info(f"Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
     df.to_parquet(dest, index=False, engine="pyarrow")
-    print(f"[BRONZE] Rejected loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
+    logger.info(f"Rejected loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
+
+    try:
+        from pipeline.data_quality import validate_bronze
+        result = validate_bronze(df, source_name="rejected")
+        if not result["success"]:
+            logger.warning(f"Bronze validation failed: {result}")
+    except ImportError:
+        pass
 
 
 def run():
@@ -62,8 +81,13 @@ def run():
     BRONZE_DIR.mkdir(parents=True, exist_ok=True)
     ingest_accepted()
     ingest_rejected()
-    print("[BRONZE] Done.")
+    logger.info("Bronze ingestion done.")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     run()

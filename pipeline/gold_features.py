@@ -5,9 +5,12 @@ Produces train/val/test Parquet files ready for model training.
 """
 
 import json
+import logging
 import pandas as pd
 import numpy as np
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SILVER_DIR = DATA_DIR / "silver"
@@ -88,19 +91,19 @@ def run():
     """Run Gold feature engineering and splitting."""
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("[GOLD] Reading Silver accepted ...")
+    logger.info("Reading Silver accepted ...")
     df = pd.read_parquet(SILVER_DIR / "accepted_clean.parquet")
-    print(f"[GOLD] Silver rows: {len(df):,}")
+    logger.info(f"Silver rows: {len(df):,}")
 
-    print("[GOLD] Engineering features ...")
+    logger.info("Engineering features ...")
     df = engineer_features(df)
 
-    print("[GOLD] Time-aware splitting ...")
+    logger.info("Time-aware splitting ...")
     train, val, test = time_aware_split(df)
 
-    print(f"[GOLD] Train: {len(train):,} (default rate: {train['default'].mean():.4f})")
-    print(f"[GOLD] Val:   {len(val):,} (default rate: {val['default'].mean():.4f})")
-    print(f"[GOLD] Test:  {len(test):,} (default rate: {test['default'].mean():.4f})")
+    logger.info(f"Train: {len(train):,} (default rate: {train['default'].mean():.4f})")
+    logger.info(f"Val:   {len(val):,} (default rate: {val['default'].mean():.4f})")
+    logger.info(f"Test:  {len(test):,} (default rate: {test['default'].mean():.4f})")
 
     # Save splits
     train.to_parquet(GOLD_DIR / "features_train.parquet", index=False)
@@ -126,10 +129,25 @@ def run():
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
-    print(f"[GOLD] Features: {feature_cols}")
-    print(f"[GOLD] Written to {GOLD_DIR}")
-    print("[GOLD] Done.")
+    logger.info(f"Features: {feature_cols}")
+    logger.info(f"Written to {GOLD_DIR}")
+
+    try:
+        from pipeline.data_quality import validate_gold
+        for name, split_df in [("train", train), ("val", val), ("test", test)]:
+            result = validate_gold(split_df, split_name=name)
+            if not result["success"]:
+                logger.warning(f"Gold {name} validation failed: {result}")
+    except ImportError:
+        pass
+
+    logger.info("Gold feature engineering done.")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     run()

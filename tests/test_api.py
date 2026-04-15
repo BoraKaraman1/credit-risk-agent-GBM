@@ -6,12 +6,13 @@ Uses TestClient with mocked Supabase — no database required.
 import pytest
 import json
 import numpy as np
+import shap
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
 from fastapi.testclient import TestClient
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from api.models import ScoreResponse, HealthResponse
+from api.models import ScoreResponse, HealthResponse, AdverseAction
 
 
 # --- Fixtures ---
@@ -45,6 +46,7 @@ def client(dummy_model, dummy_meta):
     svc._model = dummy_model
     svc._model_meta = dummy_meta
     svc._model_loaded_at = datetime.now(timezone.utc).isoformat()
+    svc._explainer = shap.TreeExplainer(dummy_model)
 
     return TestClient(svc.app)
 
@@ -109,6 +111,55 @@ class TestScoreEndpoint:
         assert 0 <= data["score"] <= 1
         assert data["decision"] in ("approve", "review", "decline")
         assert data["model_version"] == "v1.0"
+        assert "adverse_actions" in data
+
+    @patch("api.scoring_service.get_engine")
+    @patch("api.scoring_service.fetch_features")
+    def test_adverse_actions_present_for_decline_review(self, mock_fetch_fn, mock_engine,
+                                                         client, dummy_model, dummy_meta):
+        """Adverse actions should be present when decision is decline or review."""
+        import api.scoring_service as svc
+        mock_engine.return_value = MagicMock()
+
+        # Try multiple random feature sets to find a decline/review
+        found_non_approve = False
+        for seed in range(50):
+            rng = np.random.RandomState(seed)
+            features = {f"f{i}": float(rng.randn()) for i in range(5)}
+            mock_fetch_fn.side_effect = self._mock_fetch(features)
+            resp = client.post("/score", json={"applicant_id": f"T_{seed}"})
+            data = resp.json()
+
+            if data["decision"] in ("decline", "review"):
+                found_non_approve = True
+                assert len(data["adverse_actions"]) > 0
+                for action in data["adverse_actions"]:
+                    assert action["shap_value"] > 0
+                    assert action["direction"] == "increases risk"
+                break
+
+        # If all were approve, verify adverse_actions is empty for approve
+        if not found_non_approve:
+            assert data["adverse_actions"] == []
+
+    @patch("api.scoring_service.get_engine")
+    @patch("api.scoring_service.fetch_features")
+    def test_adverse_actions_empty_for_approve(self, mock_fetch_fn, mock_engine,
+                                                client, dummy_model, dummy_meta):
+        """Adverse actions should be empty when decision is approve."""
+        import api.scoring_service as svc
+        mock_engine.return_value = MagicMock()
+
+        for seed in range(50):
+            rng = np.random.RandomState(seed)
+            features = {f"f{i}": float(rng.randn()) for i in range(5)}
+            mock_fetch_fn.side_effect = self._mock_fetch(features)
+            resp = client.post("/score", json={"applicant_id": f"T_{seed}"})
+            data = resp.json()
+
+            if data["decision"] == "approve":
+                assert data["adverse_actions"] == []
+                break
 
     @patch("api.scoring_service.get_engine")
     @patch("api.scoring_service.fetch_features")
@@ -192,6 +243,25 @@ class TestPydanticModels:
         )
         assert resp.score == 0.123
         assert resp.fico_score is None  # optional
+        assert resp.adverse_actions == []  # default empty
+
+    def test_score_response_with_adverse_actions(self):
+        resp = ScoreResponse(
+            applicant_id="LC_002",
+            score=0.45,
+            decision="decline",
+            model_version="v1.0",
+            adverse_actions=[
+                AdverseAction(
+                    feature_name="Debt-to-Income Ratio",
+                    shap_value=0.05,
+                    feature_value=35.0,
+                    direction="increases risk",
+                ),
+            ],
+        )
+        assert len(resp.adverse_actions) == 1
+        assert resp.adverse_actions[0].feature_name == "Debt-to-Income Ratio"
 
     def test_health_response_schema(self):
         resp = HealthResponse(
