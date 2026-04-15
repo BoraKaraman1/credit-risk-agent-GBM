@@ -1,5 +1,9 @@
 # Credit Risk Scoring Pipeline
 
+> **TL;DR:** Production-grade credit risk pipeline scoring 2.3M+ Lending Club loans — featuring a medallion data architecture, SHAP-based regulatory-compliant adverse action reasons, automated drift monitoring, and fairness analysis. Test AUC of 0.718 on origination-only features (upper end for this dataset, where typical models achieve 0.68–0.73).
+
+---
+
 End-to-end credit risk modeling pipeline built on Lending Club data (2.3M+ loans). Implements a medallion architecture (Bronze/Silver/Gold), gradient boosting model training, a real-time scoring API with SHAP-based adverse action reasons, automated drift monitoring, fairness analysis, data quality validation, and Airflow orchestration — all on free-tier infrastructure.
 
 ## Architecture
@@ -20,7 +24,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           FASTAPI
 │   gold/    (features)   │──[GX]──>│ training_dist    │        └────────────┘
 │   models/  (champion)   │          └─────────────────┘              │
 └─────────────────────────┘                 ▲                         │
-         │                          Claude Code Agents ───────────────┘
+         │                          Monitoring Agents ────────────────┘
          └── Fairness Analysis      (drift, performance, retrain)
              (DIR, EOD, SPD)
 
@@ -40,7 +44,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           FASTAPI
 | Experiment tracking | MLflow (local) |
 | Interpretability | SHAP (adverse action reasons) |
 | Fairness | Disparate Impact, Equal Opportunity, Statistical Parity |
-| Monitoring | Claude Code agents (PSI, CSI, AUC tracking) |
+| Monitoring | Automated agents (PSI, CSI, AUC tracking) |
 
 ## Project Structure
 
@@ -288,7 +292,7 @@ python -m pipeline.data_quality
 
 ## Model Performance
 
-Trained on Lending Club origination-time features only (no data leakage).
+Trained on Lending Club origination-time features only (no data leakage). Origination-only models on this dataset typically achieve 0.68–0.73 AUC; this pipeline sits at the upper end of that range.
 
 | Split | Period | AUC | KS | Gini |
 |-------|--------|-----|-----|------|
