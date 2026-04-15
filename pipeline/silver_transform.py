@@ -4,9 +4,12 @@ Bronze → Silver: clean, type-cast, validate, create target variable.
 Only origination-time columns are kept (no leakage).
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 BRONZE_DIR = DATA_DIR / "bronze"
@@ -60,15 +63,15 @@ def transform_accepted():
     source = BRONZE_DIR / "accepted_2007_2018.parquet"
     dest = SILVER_DIR / "accepted_clean.parquet"
 
-    print(f"[SILVER] Reading {source} ...")
+    logger.info(f"Reading {source} ...")
     df = pd.read_parquet(source)
-    print(f"[SILVER] Bronze rows: {len(df):,}")
+    logger.info(f"Bronze rows: {len(df):,}")
 
     # --- Target variable ---
     df = df[df["loan_status"].isin(DEFAULT_STATUSES | NON_DEFAULT_STATUSES)].copy()
     df["default"] = df["loan_status"].isin(DEFAULT_STATUSES).astype(int)
-    print(f"[SILVER] After filtering to resolved loans: {len(df):,}")
-    print(f"[SILVER] Default rate: {df['default'].mean():.4f} ({df['default'].sum():,} defaults)")
+    logger.info(f"After filtering to resolved loans: {len(df):,}")
+    logger.info(f"Default rate: {df['default'].mean():.4f} ({df['default'].sum():,} defaults)")
 
     # --- Keep issue_d for time-aware splitting in Gold, then origination cols ---
     keep_cols = ORIGINATION_COLS + ["default"]
@@ -127,19 +130,27 @@ def transform_accepted():
     df = df[df["fico_score"].between(300, 850)]
     n_after = len(df)
     if n_before != n_after:
-        print(f"[SILVER] Quality gate removed {n_before - n_after:,} rows")
+        logger.info(f"Quality gate removed {n_before - n_after:,} rows")
 
     # Assert non-null completeness
     null_pcts = df.isnull().mean()
     failing = null_pcts[null_pcts > 0.05]
     if len(failing) > 0:
-        print(f"[SILVER] WARNING: Columns with >5% null: {failing.to_dict()}")
+        logger.warning(f"Columns with >5% null: {failing.to_dict()}")
     else:
-        print("[SILVER] Quality gate passed: all columns <5% null")
+        logger.info("Quality gate passed: all columns <5% null")
 
-    print(f"[SILVER] Final accepted: {len(df):,} rows × {len(df.columns)} cols")
+    logger.info(f"Final accepted: {len(df):,} rows × {len(df.columns)} cols")
     df.to_parquet(dest, index=False, engine="pyarrow")
-    print(f"[SILVER] Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+    logger.info(f"Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+
+    try:
+        from pipeline.data_quality import validate_silver
+        result = validate_silver(df)
+        if not result["success"]:
+            logger.warning(f"Silver validation failed: {result}")
+    except ImportError:
+        pass
 
 
 def transform_rejected():
@@ -147,9 +158,9 @@ def transform_rejected():
     source = BRONZE_DIR / "rejected_2007_2018.parquet"
     dest = SILVER_DIR / "rejected_clean.parquet"
 
-    print(f"[SILVER] Reading {source} ...")
+    logger.info(f"Reading {source} ...")
     df = pd.read_parquet(source)
-    print(f"[SILVER] Bronze rejected rows: {len(df):,}")
+    logger.info(f"Bronze rejected rows: {len(df):,}")
 
     # Rename to match accepted column conventions
     df = df.rename(columns={
@@ -182,9 +193,9 @@ def transform_rejected():
     # Drop rows with no FICO or loan amount
     df = df.dropna(subset=["loan_amnt", "fico_score"])
 
-    print(f"[SILVER] Final rejected: {len(df):,} rows × {len(df.columns)} cols")
+    logger.info(f"Final rejected: {len(df):,} rows × {len(df.columns)} cols")
     df.to_parquet(dest, index=False, engine="pyarrow")
-    print(f"[SILVER] Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
+    logger.info(f"Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
 def run():
@@ -192,8 +203,13 @@ def run():
     SILVER_DIR.mkdir(parents=True, exist_ok=True)
     transform_accepted()
     transform_rejected()
-    print("[SILVER] Done.")
+    logger.info("Silver transformation done.")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     run()

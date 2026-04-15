@@ -11,7 +11,8 @@ Steps:
 """
 
 import json
-import pickle
+import logging
+import joblib
 import pandas as pd
 import numpy as np
 import mlflow
@@ -20,6 +21,10 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, roc_curve
 from pathlib import Path
 from datetime import datetime, timezone
+
+from pipeline.train import _model_path
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SILVER_DIR = DATA_DIR / "silver"
@@ -50,11 +55,10 @@ def load_data():
 
     rejected = pd.read_parquet(SILVER_DIR / "rejected_clean.parquet")
 
-    champion_path = MODELS_DIR / "champion" / "model.pkl"
+    champion_path = _model_path(MODELS_DIR / "champion")
     if not champion_path.exists():
         raise FileNotFoundError("No champion model found. Run train.py first.")
-    with open(champion_path, "rb") as f:
-        champion_model = pickle.load(f)
+    champion_model = joblib.load(champion_path)
 
     return train, val, test, rejected, champion_model, feature_cols
 
@@ -77,7 +81,7 @@ def align_rejected_features(rejected, feature_cols, train):
     for col in overlap_cols:
         aligned[col] = rejected_sample[col]
 
-    print(f"[REJECT] Overlapping features: {overlap_cols}")
+    logger.info(f"Overlapping features: {overlap_cols}")
 
     # Fill remaining features with training medians
     train_medians = train[feature_cols].median()
@@ -88,7 +92,7 @@ def align_rejected_features(rejected, feature_cols, train):
     # Ensure column order and fill any remaining NaN
     aligned = aligned[feature_cols].fillna(train_medians)
 
-    print(f"[REJECT] Aligned {len(aligned):,} rejected applicants to {len(feature_cols)} features")
+    logger.info(f"Aligned {len(aligned):,} rejected applicants to {len(feature_cols)} features")
     return aligned
 
 
@@ -109,11 +113,11 @@ def assign_pseudo_labels(champion_model, rejected_aligned, training_default_rate
 
     pseudo_labels = (scores >= threshold).astype(int)
 
-    print(f"[REJECT] Training default rate (accepted): {training_default_rate:.3f}")
-    print(f"[REJECT] Assumed reject default rate: {reject_default_rate:.3f}")
-    print(f"[REJECT] Score threshold: {threshold:.4f}")
-    print(f"[REJECT] Pseudo-labels — default: {pseudo_labels.sum():,}, "
-          f"non-default: {(pseudo_labels == 0).sum():,}")
+    logger.info(f"Training default rate (accepted): {training_default_rate:.3f}")
+    logger.info(f"Assumed reject default rate: {reject_default_rate:.3f}")
+    logger.info(f"Score threshold: {threshold:.4f}")
+    logger.info(f"Pseudo-labels — default: {pseudo_labels.sum():,}, "
+                f"non-default: {(pseudo_labels == 0).sum():,}")
 
     return pseudo_labels, scores
 
@@ -135,8 +139,8 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
     weights_all = np.concatenate([sample_weights, np.ones(len(X_val))])
     val_fraction = len(X_val) / len(X_all)
 
-    print(f"[REJECT] Combined training set: {len(X_combined):,} rows "
-          f"(accepted={len(X_accepted):,}, rejected={len(X_rejected):,})")
+    logger.info(f"Combined training set: {len(X_combined):,} rows "
+                f"(accepted={len(X_accepted):,}, rejected={len(X_rejected):,})")
 
     model = HistGradientBoostingClassifier(
         max_iter=1000,
@@ -155,7 +159,7 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
     )
 
     model.fit(X_all, y_all, sample_weight=weights_all)
-    print(f"[REJECT] Augmented model iterations: {model.n_iter_}")
+    logger.info(f"Augmented model iterations: {model.n_iter_}")
 
     return model
 
@@ -187,15 +191,16 @@ def compare_models(champion, augmented, X_test, y_test, feature_cols):
         "auc_delta": round(auc_aug - auc_champ, 4),
     }
 
-    print("\n[REJECT] Model Comparison on Test Set")
-    print("=" * 55)
-    print(f"{'Metric':<20} {'Champion':>15} {'Augmented':>15}")
-    print("-" * 55)
-    print(f"{'AUC':.<20} {auc_champ:>15.4f} {auc_aug:>15.4f}")
-    print(f"{'KS':.<20} {ks_champ:>15.4f} {ks_aug:>15.4f}")
-    print(f"{'Gini':.<20} {2*auc_champ-1:>15.4f} {2*auc_aug-1:>15.4f}")
-    print(f"\nPSI between models: {psi:.4f}")
-    print(f"AUC delta: {auc_aug - auc_champ:+.4f}")
+    logger.info("")
+    logger.info("Model Comparison on Test Set")
+    logger.info("=" * 55)
+    logger.info(f"{'Metric':<20} {'Champion':>15} {'Augmented':>15}")
+    logger.info("-" * 55)
+    logger.info(f"{'AUC':.<20} {auc_champ:>15.4f} {auc_aug:>15.4f}")
+    logger.info(f"{'KS':.<20} {ks_champ:>15.4f} {ks_aug:>15.4f}")
+    logger.info(f"{'Gini':.<20} {2*auc_champ-1:>15.4f} {2*auc_aug-1:>15.4f}")
+    logger.info(f"PSI between models: {psi:.4f}")
+    logger.info(f"AUC delta: {auc_aug - auc_champ:+.4f}")
 
     return results
 
@@ -205,8 +210,7 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
     dest = MODELS_DIR / "challenger"
     dest.mkdir(parents=True, exist_ok=True)
 
-    with open(dest / "model.pkl", "wb") as f:
-        pickle.dump(model, f)
+    joblib.dump(model, dest / "model.joblib")
 
     # Determine version
     champion_meta_path = MODELS_DIR / "champion" / "model_metadata.json"
@@ -238,7 +242,7 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
     with open(dest / "model_metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\n[REJECT] Augmented model saved as challenger {version} at {dest}")
+    logger.info(f"Augmented model saved as challenger {version} at {dest}")
     return version
 
 
@@ -247,21 +251,21 @@ def run():
     mlflow.set_tracking_uri(str(MODELS_DIR / "mlruns"))
     mlflow.set_experiment("credit_risk_reject_inference")
 
-    print("[REJECT] Loading data ...")
+    logger.info("Loading data ...")
     train, val, test, rejected, champion_model, feature_cols = load_data()
 
     X_train, y_train = train[feature_cols], train["default"]
     X_val, y_val = val[feature_cols], val["default"]
     X_test, y_test = test[feature_cols], test["default"]
 
-    print(f"[REJECT] Accepted train: {len(train):,} | Rejected pool: {len(rejected):,}")
+    logger.info(f"Accepted train: {len(train):,} | Rejected pool: {len(rejected):,}")
 
     # Step 1: Align rejected features
-    print("\n[REJECT] Step 1: Aligning rejected features ...")
+    logger.info("Step 1: Aligning rejected features ...")
     rejected_aligned = align_rejected_features(rejected, feature_cols, train)
 
     # Step 2: Assign pseudo-labels
-    print("\n[REJECT] Step 2: Assigning pseudo-labels ...")
+    logger.info("Step 2: Assigning pseudo-labels ...")
     training_default_rate = y_train.mean()
     pseudo_labels, rejected_scores = assign_pseudo_labels(
         champion_model, rejected_aligned, training_default_rate
@@ -270,7 +274,7 @@ def run():
     rejected_aligned["default"] = pseudo_labels
 
     # Step 3: Train augmented model
-    print("\n[REJECT] Step 3: Training augmented model ...")
+    logger.info("Step 3: Training augmented model ...")
     with mlflow.start_run():
         augmented_model = train_augmented_model(
             X_train, y_train,
@@ -279,7 +283,7 @@ def run():
         )
 
         # Step 4: Compare vs champion
-        print("\n[REJECT] Step 4: Comparing models ...")
+        logger.info("Step 4: Comparing models ...")
         comparison = compare_models(champion_model, augmented_model,
                                     X_test, y_test, feature_cols)
 
@@ -311,19 +315,24 @@ def run():
     # Recommendation
     auc_delta = comparison["auc_delta"]
     psi = comparison["psi_between_models"]
-    print("\n" + "=" * 55)
+    logger.info("=" * 55)
     if auc_delta > 0 and psi < 0.25:
-        print(f"RECOMMENDATION: Promote augmented model (AUC +{auc_delta:.4f}, PSI {psi:.4f})")
+        logger.info(f"RECOMMENDATION: Promote augmented model (AUC +{auc_delta:.4f}, PSI {psi:.4f})")
     elif auc_delta > 0 and psi >= 0.25:
-        print(f"CAUTION: AUC improved (+{auc_delta:.4f}) but high PSI ({psi:.4f}). "
-              "Review score distribution shift before promoting.")
+        logger.info(f"CAUTION: AUC improved (+{auc_delta:.4f}) but high PSI ({psi:.4f}). "
+                     "Review score distribution shift before promoting.")
     else:
-        print(f"RECOMMENDATION: Keep champion (augmented AUC delta: {auc_delta:+.4f})")
-    print("=" * 55)
+        logger.info(f"RECOMMENDATION: Keep champion (augmented AUC delta: {auc_delta:+.4f})")
+    logger.info("=" * 55)
 
-    print("\n[REJECT] Done.")
+    logger.info("Reject inference done.")
     return augmented_model, comparison
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     run()

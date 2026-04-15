@@ -1,13 +1,16 @@
 """
 Credit Risk Scoring API
 FastAPI service that loads the champion model, queries Supabase for features,
-and returns a credit decision with logging.
+and returns a credit decision with SHAP-based adverse action reasons and logging.
 """
 
 import json
+import logging
 import os
-import pickle
+import joblib
 import numpy as np
+import shap
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,10 +19,12 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 from api.models import (
-    ScoreRequest, ScoreResponse,
+    ScoreRequest, ScoreResponse, AdverseAction,
     BatchScoreRequest, BatchScoreResponse,
     HealthResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -30,13 +35,60 @@ MODELS_DIR = DATA_DIR / "models"
 APPROVE_THRESHOLD = 0.15
 REVIEW_THRESHOLD = 0.30
 
-app = FastAPI(title="Credit Risk Scoring API", version="1.0.0")
+# ECOA adverse action: return top 4 reasons
+NUM_ADVERSE_ACTIONS = 4
+
+# Human-readable feature name mapping (all 33 Gold features)
+FEATURE_DISPLAY_NAMES = {
+    "loan_amnt": "Loan Amount",
+    "term": "Loan Term",
+    "int_rate": "Interest Rate",
+    "installment": "Monthly Installment",
+    "emp_length": "Employment Length",
+    "home_ownership": "Home Ownership Status",
+    "annual_inc": "Annual Income",
+    "verification_status": "Income Verification Status",
+    "purpose": "Loan Purpose",
+    "dti": "Debt-to-Income Ratio",
+    "delinq_2yrs": "Delinquencies in Last 2 Years",
+    "inq_last_6mths": "Credit Inquiries in Last 6 Months",
+    "mths_since_last_delinq": "Months Since Last Delinquency",
+    "open_acc": "Number of Open Accounts",
+    "pub_rec": "Public Records",
+    "revol_bal": "Revolving Balance",
+    "revol_util": "Revolving Utilization Rate",
+    "total_acc": "Total Number of Accounts",
+    "mort_acc": "Number of Mortgage Accounts",
+    "pub_rec_bankruptcies": "Public Record Bankruptcies",
+    "credit_history_months": "Length of Credit History",
+    "fico_score": "FICO Score",
+    "emp_length_missing": "Employment Length Not Reported",
+    "log_annual_inc": "Log Annual Income",
+    "loan_to_income": "Loan-to-Income Ratio",
+    "installment_to_income": "Installment-to-Income Ratio",
+    "dti_x_income": "Absolute Debt Burden",
+    "grade_numeric": "Credit Grade",
+    "delinq_ever": "Prior Delinquency Flag",
+    "high_utilization": "High Credit Utilization Flag",
+    "has_mortgage": "Mortgage Account Flag",
+    "has_bankruptcy": "Bankruptcy on Record",
+    "sub_grade_numeric": "Credit Sub-Grade",
+}
 
 # --- Global state loaded at startup ---
 _model = None
 _model_meta = None
 _model_loaded_at = None
+_explainer = None
 _engine = None
+
+
+def _model_path(directory):
+    """Resolve model path with backward compat."""
+    p = directory / "model.joblib"
+    if p.exists():
+        return p
+    return directory / "model.pkl"
 
 
 def get_engine():
@@ -50,26 +102,30 @@ def get_engine():
 
 
 def load_model():
-    global _model, _model_meta, _model_loaded_at
+    global _model, _model_meta, _model_loaded_at, _explainer
     champion_dir = MODELS_DIR / "champion"
-    model_path = champion_dir / "model.pkl"
+    model_path = _model_path(champion_dir)
     meta_path = champion_dir / "model_metadata.json"
 
     if not model_path.exists():
         raise RuntimeError(f"No champion model at {model_path}")
 
-    with open(model_path, "rb") as f:
-        _model = pickle.load(f)
+    _model = joblib.load(model_path)
     with open(meta_path) as f:
         _model_meta = json.load(f)
     _model_loaded_at = datetime.now(timezone.utc).isoformat()
+    _explainer = shap.TreeExplainer(_model)
 
-    print(f"[API] Loaded model {_model_meta['version']} ({_model_meta['n_features']} features)")
+    logger.info(f"Loaded model {_model_meta['version']} ({_model_meta['n_features']} features), SHAP explainer ready")
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     load_model()
+    yield
+
+
+app = FastAPI(title="Credit Risk Scoring API", version="1.0.0", lifespan=lifespan)
 
 
 def fetch_features(applicant_id: str) -> dict:
@@ -109,8 +165,33 @@ def fetch_features(applicant_id: str) -> dict:
     }
 
 
+def _compute_adverse_actions(X: np.ndarray, feature_cols: list[str],
+                              features: dict) -> list[AdverseAction]:
+    """Compute top adverse action reasons via SHAP for a single applicant."""
+    shap_values = _explainer.shap_values(X)
+    shap_row = shap_values[0]  # single applicant
+
+    # Positive SHAP values push toward default (class 1) → increase risk
+    sorted_indices = np.argsort(-shap_row)
+
+    actions = []
+    for idx in sorted_indices:
+        if shap_row[idx] <= 0:
+            break
+        if len(actions) >= NUM_ADVERSE_ACTIONS:
+            break
+        feat_name = feature_cols[idx]
+        actions.append(AdverseAction(
+            feature_name=FEATURE_DISPLAY_NAMES.get(feat_name, feat_name),
+            shap_value=round(float(shap_row[idx]), 5),
+            feature_value=round(float(features.get(feat_name, 0.0) or 0.0), 4),
+            direction="increases risk",
+        ))
+    return actions
+
+
 def score_applicant(applicant_id: str) -> ScoreResponse:
-    """Score a single applicant: fetch features → predict → decide → log."""
+    """Score a single applicant: fetch features → predict → decide → explain → log."""
     feat_data = fetch_features(applicant_id)
     features = feat_data["features"]
 
@@ -127,6 +208,11 @@ def score_applicant(applicant_id: str) -> ScoreResponse:
         decision = "review"
     else:
         decision = "decline"
+
+    # ECOA adverse action reasons (only for decline/review)
+    adverse_actions = []
+    if decision in ("decline", "review"):
+        adverse_actions = _compute_adverse_actions(X, feature_cols, features)
 
     # Log to scoring_log
     try:
@@ -148,7 +234,7 @@ def score_applicant(applicant_id: str) -> ScoreResponse:
                 },
             )
     except Exception as e:
-        print(f"[API] Warning: failed to log scoring decision: {e}")
+        logger.warning(f"Failed to log scoring decision: {e}")
 
     return ScoreResponse(
         applicant_id=applicant_id,
@@ -158,6 +244,7 @@ def score_applicant(applicant_id: str) -> ScoreResponse:
         fico_score=feat_data["fico_score"],
         grade=feat_data["grade"],
         data_completeness=feat_data["data_completeness"],
+        adverse_actions=adverse_actions,
     )
 
 

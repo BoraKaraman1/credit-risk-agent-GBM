@@ -6,7 +6,8 @@ Designed to be invoked by Claude Code as a subagent.
 """
 
 import json
-import pickle
+import logging
+import joblib
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
@@ -16,6 +17,16 @@ from agents.config import (
     MODELS_DIR, GOLD_DIR, SUPABASE_DB_URL,
     PSI_WARNING, PSI_CRITICAL, CSI_THRESHOLD,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _model_path(directory):
+    """Resolve model path with backward compat."""
+    p = directory / "model.joblib"
+    if p.exists():
+        return p
+    return directory / "model.pkl"
 
 
 def compute_psi(expected, actual, bins=10):
@@ -71,11 +82,10 @@ def run(production_scores=None, production_features=None):
     Returns a report dict with PSI, CSI, and recommendations.
     """
     # Load champion model and training data
-    model_path = MODELS_DIR / "champion" / "model.pkl"
+    model_path = _model_path(MODELS_DIR / "champion")
     meta_path = MODELS_DIR / "champion" / "model_metadata.json"
 
-    with open(model_path, "rb") as f:
-        model = pickle.load(f)
+    model = joblib.load(model_path)
     with open(meta_path) as f:
         meta = json.load(f)
 
@@ -97,9 +107,9 @@ def run(production_scores=None, production_features=None):
                     ).fetchall()
                 if rows:
                     production_scores = np.array([r[0] for r in rows], dtype=float)
-                    print(f"[DRIFT] Using {len(production_scores):,} scores from scoring_log")
+                    logger.info(f"Using {len(production_scores):,} scores from scoring_log")
             except Exception as e:
-                print(f"[DRIFT] Could not read scoring_log: {e}")
+                logger.warning(f"Could not read scoring_log: {e}")
 
     if production_scores is None:
         # Fall back to test set as proxy
@@ -107,7 +117,7 @@ def run(production_scores=None, production_features=None):
         X_test = test[feature_cols]
         production_scores = model.predict_proba(X_test)[:, 1]
         production_features = X_test
-        print("[DRIFT] Using test set as production proxy")
+        logger.info("Using test set as production proxy")
 
     # --- PSI on score distribution ---
     psi, train_pct, prod_pct = compute_psi(train_scores, production_scores)
@@ -118,7 +128,7 @@ def run(production_scores=None, production_features=None):
     elif psi > PSI_WARNING:
         psi_status = "WARNING"
 
-    print(f"[DRIFT] Score PSI = {psi:.4f} ({psi_status})")
+    logger.info(f"Score PSI = {psi:.4f} ({psi_status})")
 
     # --- CSI on individual features ---
     csi_results = {}
@@ -133,9 +143,9 @@ def run(production_scores=None, production_features=None):
 
         drifted_features = {k: v for k, v in csi_results.items() if v > CSI_THRESHOLD}
         if drifted_features:
-            print(f"[DRIFT] Features with CSI > {CSI_THRESHOLD}: {drifted_features}")
+            logger.info(f"Features with CSI > {CSI_THRESHOLD}: {drifted_features}")
         else:
-            print(f"[DRIFT] No individual features above CSI threshold ({CSI_THRESHOLD})")
+            logger.info(f"No individual features above CSI threshold ({CSI_THRESHOLD})")
 
     # --- Build report ---
     report = {
@@ -171,9 +181,9 @@ def run(production_scores=None, production_features=None):
                         }),
                     },
                 )
-            print("[DRIFT] Results logged to drift_log table")
+            logger.info("Results logged to drift_log table")
         except Exception as e:
-            print(f"[DRIFT] Could not log to Supabase: {e}")
+            logger.warning(f"Could not log to Supabase: {e}")
 
     return report
 
@@ -201,5 +211,10 @@ def _make_recommendation(psi, psi_status, csi_results):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     report = run()
     print(json.dumps(report, indent=2))

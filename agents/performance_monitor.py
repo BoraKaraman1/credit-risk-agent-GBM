@@ -6,7 +6,8 @@ Designed to be invoked by Claude Code as a subagent.
 """
 
 import json
-import pickle
+import logging
+import joblib
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
@@ -16,6 +17,16 @@ from sqlalchemy import create_engine, text
 from agents.config import (
     MODELS_DIR, GOLD_DIR, SUPABASE_DB_URL, AUC_DROP_THRESHOLD,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _model_path(directory):
+    """Resolve model path with backward compat."""
+    p = directory / "model.joblib"
+    if p.exists():
+        return p
+    return directory / "model.pkl"
 
 
 def compute_ks(y_true, y_score):
@@ -34,12 +45,11 @@ def run():
     """
     # Load champion model and metadata
     meta_path = MODELS_DIR / "champion" / "model_metadata.json"
-    model_path = MODELS_DIR / "champion" / "model.pkl"
+    model_path = _model_path(MODELS_DIR / "champion")
 
     with open(meta_path) as f:
         meta = json.load(f)
-    with open(model_path, "rb") as f:
-        model = pickle.load(f)
+    model = joblib.load(model_path)
 
     training_metrics = meta["metrics"]
     feature_cols = meta["features"]
@@ -67,9 +77,9 @@ def run():
                 y_score = np.array([r[0] for r in rows], dtype=float)
                 y_true = np.array([int(r[1]) for r in rows])
                 outcomes_source = f"scoring_log ({len(rows):,} outcomes)"
-                print(f"[PERF] Using {len(rows):,} outcomes from scoring_log")
+                logger.info(f"Using {len(rows):,} outcomes from scoring_log")
         except Exception as e:
-            print(f"[PERF] Could not read scoring_log: {e}")
+            logger.warning(f"Could not read scoring_log: {e}")
 
     if y_true is None:
         # Fall back to test set
@@ -77,7 +87,7 @@ def run():
         X_test = test[feature_cols]
         y_true = test["default"].values
         y_score = model.predict_proba(X_test)[:, 1]
-        print("[PERF] Using test set as production proxy")
+        logger.info("Using test set as production proxy")
 
     # Compute current metrics
     current_auc = roc_auc_score(y_true, y_score)
@@ -108,8 +118,8 @@ def run():
     default_rates = [d["default_rate"] for d in decile_stats]
     rank_order_breaks = sum(1 for i in range(1, len(default_rates)) if default_rates[i] < default_rates[i-1])
 
-    print(f"[PERF] Current AUC={current_auc:.4f}  Training AUC={train_auc:.4f}  Drop={auc_drop:.4f}")
-    print(f"[PERF] Rank-ordering breaks: {rank_order_breaks}")
+    logger.info(f"Current AUC={current_auc:.4f}  Training AUC={train_auc:.4f}  Drop={auc_drop:.4f}")
+    logger.info(f"Rank-ordering breaks: {rank_order_breaks}")
 
     # Build report
     report = {
@@ -148,7 +158,7 @@ def run():
                     },
                 )
         except Exception as e:
-            print(f"[PERF] Could not log to Supabase: {e}")
+            logger.warning(f"Could not log to Supabase: {e}")
 
     return report
 
@@ -173,5 +183,10 @@ def _make_recommendation(auc_drop, rank_breaks, current_metrics):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     report = run()
     print(json.dumps(report, indent=2))

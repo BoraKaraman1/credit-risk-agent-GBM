@@ -5,7 +5,8 @@ Uses sklearn HistGradientBoostingClassifier (XGBoost-equivalent, no OpenMP depen
 """
 
 import json
-import pickle
+import logging
+import joblib
 import pandas as pd
 import numpy as np
 import mlflow
@@ -16,9 +17,19 @@ from sklearn.calibration import calibration_curve
 from pathlib import Path
 from datetime import datetime, timezone
 
+logger = logging.getLogger(__name__)
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 GOLD_DIR = DATA_DIR / "gold"
 MODELS_DIR = DATA_DIR / "models"
+
+
+def _model_path(directory):
+    """Resolve model path with backward compat (joblib first, then pkl fallback)."""
+    p = directory / "model.joblib"
+    if p.exists():
+        return p
+    return directory / "model.pkl"
 
 
 def compute_ks(y_true, y_score):
@@ -62,25 +73,13 @@ def train_model(X_train, y_train, X_val, y_val, params=None):
             "l2_regularization": 1.0,
             "max_bins": 255,
             "early_stopping": True,
-            "validation_fraction": None,  # we provide our own val set
+            "validation_fraction": None,
             "n_iter_no_change": 50,
             "scoring": "roc_auc",
             "random_state": 42,
             "verbose": 1,
         }
 
-    model = HistGradientBoostingClassifier(**params)
-
-    # HistGradientBoosting uses fit with validation set for early stopping
-    model.fit(X_train, y_train, sample_weight=None)
-
-    # Re-fit with early stopping using validation data
-    # HistGradientBoosting handles this internally when validation_fraction is set
-    # For explicit val set, we use a different approach:
-    params_with_val = {**params, "validation_fraction": None, "early_stopping": False}
-
-    # Actually, let's use the built-in early stopping properly
-    # We combine train+val and set validation_fraction
     combined_X = pd.concat([X_train, X_val], ignore_index=True)
     combined_y = pd.concat([y_train, y_val], ignore_index=True)
     val_fraction = len(X_val) / len(combined_X)
@@ -91,7 +90,7 @@ def train_model(X_train, y_train, X_val, y_val, params=None):
     model = HistGradientBoostingClassifier(**params)
     model.fit(combined_X, combined_y)
 
-    print(f"[TRAIN] Best iteration: {model.n_iter_}")
+    logger.info(f"Best iteration: {model.n_iter_}")
 
     return model, params
 
@@ -104,17 +103,16 @@ def evaluate_model(model, X, y, split_name="test"):
     ks = compute_ks(y, y_score)
     gini = compute_gini(auc)
 
-    print(f"[{split_name}] AUC={auc:.4f}  KS={ks:.4f}  Gini={gini:.4f}")
+    logger.info(f"[{split_name}] AUC={auc:.4f}  KS={ks:.4f}  Gini={gini:.4f}")
     return {"auc": round(auc, 4), "ks": round(ks, 4), "gini": round(gini, 4)}
 
 
 def save_model(model, feature_cols, metrics, version, dest_dir):
-    """Save model pickle and metadata JSON."""
+    """Save model and metadata JSON."""
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    model_path = dest_dir / "model.pkl"
-    with open(model_path, "wb") as f:
-        pickle.dump(model, f)
+    model_path = dest_dir / "model.joblib"
+    joblib.dump(model, model_path)
 
     meta = {
         "version": version,
@@ -126,7 +124,7 @@ def save_model(model, feature_cols, metrics, version, dest_dir):
     with open(dest_dir / "model_metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"[MODEL] Saved to {dest_dir}")
+    logger.info(f"Model saved to {dest_dir}")
     return model_path
 
 
@@ -135,12 +133,12 @@ def run(as_challenger=False):
     mlflow.set_tracking_uri(str(MODELS_DIR / "mlruns"))
     mlflow.set_experiment("credit_risk_gbm")
 
-    print("[TRAIN] Loading Gold data ...")
+    logger.info("Loading Gold data ...")
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = load_gold_data()
-    print(f"[TRAIN] Train={len(X_train):,}  Val={len(X_val):,}  Test={len(X_test):,}")
+    logger.info(f"Train={len(X_train):,}  Val={len(X_val):,}  Test={len(X_test):,}")
 
     with mlflow.start_run():
-        print("[TRAIN] Training HistGradientBoosting ...")
+        logger.info("Training HistGradientBoosting ...")
         model, params = train_model(X_train, y_train, X_val, y_val)
 
         # Log params (convert non-string values for MLflow)
@@ -187,9 +185,14 @@ def run(as_challenger=False):
         mlflow.log_param("model_version", version)
         mlflow.log_param("role", "challenger" if as_challenger else "champion")
 
-    print(f"[TRAIN] Done. Model {version} saved as {'challenger' if as_challenger else 'champion'}.")
+    logger.info(f"Done. Model {version} saved as {'challenger' if as_challenger else 'champion'}.")
     return model, all_metrics
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     run()
