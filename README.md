@@ -11,17 +11,17 @@ End-to-end credit risk modeling pipeline built on Lending Club data (2.3M+ loans
 ```
                               APACHE AIRFLOW
                     ┌──────────────────────────────────┐
-                    │ credit_risk_pipeline   (@monthly) │
-                    │ credit_risk_monitoring (@weekly)  │
+                    │ credit_risk_pipeline   (@monthly)│
+                    │ credit_risk_monitoring (@weekly) │
                     └──────────────┬───────────────────┘
                                    │ orchestrates
                                    ▼
 LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           FASTAPI
 ┌─────────────────────────┐          ┌─────────────────┐        ┌────────────┐
-│ data/                   │          │ applicant_feats  │───────>│ POST /score│
-│   bronze/  (raw)        │──[GX]──>│ scoring_log      │        │ model +    │
-│   silver/  (clean)      │── sync ─>│ drift_log        │        │ SHAP       │
-│   gold/    (features)   │──[GX]──>│ training_dist    │        └────────────┘
+│ data/                   │          │ applicant_feats │───────>│ POST /score│
+│   bronze/  (raw)        │──[GX]──> │ scoring_log     │        │ model +    │
+│   silver/  (clean)      │── sync ─>│ drift_log       │        │ SHAP       │
+│   gold/    (features)   │──[GX]──> │ training_dist   │        └────────────┘
 │   models/  (champion)   │          └─────────────────┘              │
 └─────────────────────────┘                 ▲                         │
          │                          Monitoring Agents ────────────────┘
