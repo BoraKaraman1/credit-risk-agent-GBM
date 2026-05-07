@@ -325,6 +325,79 @@ pytest tests/ -v
 - `test_fairness.py` — Disparate impact, equal opportunity, statistical parity metrics
 - `test_data_quality.py` — Bronze/Silver/Gold validation with valid and invalid data
 
+## Deployment (Docker + Minikube + GCP)
+
+The project ships Dockerfiles for the scoring API and Airflow plus Kubernetes manifests for running both on Minikube. The same manifests deploy to GKE with image-registry and ingress changes.
+
+### Layout
+
+```
+docker/
+├── Dockerfile.api       # FastAPI scoring service (python:3.11-slim + uvicorn)
+└── Dockerfile.airflow   # apache/airflow:2.8.4 + project DAGs and modules
+
+k8s/
+├── namespace.yaml
+├── configmap.yaml       # MODELS_URI, GOOGLE_APPLICATION_CREDENTIALS
+├── secret.example.yaml  # DATABASE_URL + optional gcs-sa key — copy to secret.yaml
+├── scoring-api.yaml     # Deployment + NodePort Service
+└── airflow.yaml         # Standalone Airflow Deployment + NodePort Service
+```
+
+### Local run on Minikube
+
+```bash
+# 1. Start Minikube and point your shell at its Docker daemon so images are
+#    available in-cluster without a registry push.
+minikube start --cpus=4 --memory=6g
+eval $(minikube docker-env)
+
+# 2. Build images.
+docker build -f docker/Dockerfile.api     -t gbm-cs/scoring-api:dev .
+docker build -f docker/Dockerfile.airflow -t gbm-cs/airflow:dev    .
+
+# 3. Configure secrets. Copy the example, fill in DATABASE_URL, then apply.
+cp k8s/secret.example.yaml k8s/secret.yaml
+$EDITOR k8s/secret.yaml
+
+# (Optional) GCS service-account key for MODELS_URI=gs://...
+kubectl create namespace gbm-cs --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic gcs-sa -n gbm-cs --from-file=key.json=/path/to/sa.json
+
+# 4. Apply manifests.
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/secret.yaml
+kubectl apply -f k8s/scoring-api.yaml
+kubectl apply -f k8s/airflow.yaml
+
+# 5. Open the services.
+minikube service scoring-api -n gbm-cs   # opens FastAPI in browser
+minikube service airflow     -n gbm-cs   # Airflow UI; admin password is in pod logs
+```
+
+The scoring API exposes `/health`, `/score`, `/score/batch`, `/reload` — same surface as `uvicorn api.scoring_service:app` locally.
+
+### Model loading
+
+The image bakes `data/models/champion/` in for offline runs. Set `MODELS_URI` in `k8s/configmap.yaml` to a GCS prefix to pull the champion at startup instead:
+
+```yaml
+data:
+  MODELS_URI: "gs://my-models-bucket/credit-risk"
+```
+
+The API expects `<MODELS_URI>/champion/model.joblib` and `<MODELS_URI>/champion/model_metadata.json`. `/reload` re-downloads.
+
+### GCP path (Cloud SQL + GCS + GKE)
+
+| Concern | What changes |
+|---------|--------------|
+| **Cloud SQL** | Replace `DATABASE_URL` in `secret.yaml` with the Cloud SQL connection string. On GKE, prefer running the Cloud SQL Auth Proxy as a sidecar and pointing `DATABASE_URL` at `127.0.0.1`. The `pipeline/supabase_schema.sql` DDL works on Cloud SQL Postgres unchanged. |
+| **GCS** | Set `MODELS_URI=gs://...` and either mount the `gcs-sa` Secret (Minikube / non-GKE) or bind a Kubernetes ServiceAccount to a Google ServiceAccount via Workload Identity (GKE). |
+| **GKE** | Push images to Artifact Registry and update `image:` fields in `k8s/scoring-api.yaml` / `k8s/airflow.yaml` from `gbm-cs/...:dev` to `<region>-docker.pkg.dev/<project>/<repo>/...:<tag>`. Replace the `NodePort` Services with an Ingress or `type: LoadBalancer` for external traffic. |
+| **Airflow** | The bundled `airflow standalone` pod is dev-only (SQLite, ephemeral state). For production, install the official `apache-airflow` Helm chart, point it at Cloud SQL, and reuse `docker/Dockerfile.airflow` for the executor image. |
+
 ## Key Design Decisions
 
 - **No data leakage**: Only 25 origination-time columns are used. Post-origination features (payments, recoveries) are excluded.

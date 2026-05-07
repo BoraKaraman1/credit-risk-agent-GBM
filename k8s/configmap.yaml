@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: gbm-cs
+data:
+  # Point at a GCS prefix that contains champion/model.joblib + champion/model_metadata.json.
+  # Leave blank to use the model baked into the image (data/models/champion).
+  MODELS_URI: ""
+  # Path where the gcs-sa Secret is mounted; google-cloud-storage picks this up automatically.
+  GOOGLE_APPLICATION_CREDENTIALS: "/var/secrets/gcs/key.json"

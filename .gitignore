@@ -9,3 +9,7 @@ data/.DS_Store
 .DS_Store
 __pycache__/
 *.pyc
+
+# Real K8s secrets — only secret.example.yaml is committed
+k8s/secret.yaml
+k8s/secrets/

@@ -1,0 +1,22 @@
+# Airflow with the project's DAGs and pipeline modules baked in.
+# Uses the official image; runs in `airflow standalone` mode for MVS.
+FROM apache/airflow:2.8.4-python3.11
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+
+COPY --chown=airflow:root requirements.txt /tmp/requirements.txt
+# google-cloud-storage so DAG tasks can read/write GCS in the same way the API does
+RUN pip install --no-cache-dir -r /tmp/requirements.txt google-cloud-storage
+
+# Project modules — DAGs import `from pipeline.*`, `from agents.*`, `from api.*`
+ENV PYTHONPATH=/opt/airflow/project
+COPY --chown=airflow:root pipeline /opt/airflow/project/pipeline
+COPY --chown=airflow:root agents   /opt/airflow/project/agents
+COPY --chown=airflow:root api      /opt/airflow/project/api
+
+COPY --chown=airflow:root dags /opt/airflow/dags

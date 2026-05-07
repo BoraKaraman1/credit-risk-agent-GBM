@@ -7,6 +7,7 @@ and returns a credit decision with SHAP-based adverse action reasons and logging
 import json
 import logging
 import os
+import tempfile
 import joblib
 import numpy as np
 import shap
@@ -30,6 +31,10 @@ load_dotenv()
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 MODELS_DIR = DATA_DIR / "models"
+
+# Optional: gs://bucket/prefix or absolute local path overriding MODELS_DIR.
+# Used by the K8s/Cloud deployments so the image doesn't need to ship the model.
+MODELS_URI = os.environ.get("MODELS_URI")
 
 # Decision thresholds
 APPROVE_THRESHOLD = 0.15
@@ -91,6 +96,41 @@ def _model_path(directory):
     return directory / "model.pkl"
 
 
+def _download_gcs_prefix(uri: str) -> Path:
+    """Download every blob under a gs://bucket/prefix to a fresh tempdir."""
+    from google.cloud import storage  # imported lazily so local dev doesn't need it
+
+    bucket_name, _, prefix = uri[len("gs://"):].partition("/")
+    prefix = prefix.rstrip("/") + "/" if prefix else ""
+    tmpdir = Path(tempfile.mkdtemp(prefix="champion_"))
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    n = 0
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        rel = blob.name[len(prefix):]
+        if not rel or rel.endswith("/"):
+            continue
+        dest = tmpdir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(dest))
+        n += 1
+    if n == 0:
+        raise RuntimeError(f"No objects found under {uri}")
+    logger.info(f"Downloaded {n} files from {uri} to {tmpdir}")
+    return tmpdir
+
+
+def _resolve_champion_dir() -> Path:
+    """Return the local directory holding model.joblib + model_metadata.json."""
+    if MODELS_URI and MODELS_URI.startswith("gs://"):
+        # MODELS_URI points at the parent of champion/, mirroring the local layout
+        return _download_gcs_prefix(MODELS_URI.rstrip("/") + "/champion")
+    if MODELS_URI:
+        return Path(MODELS_URI) / "champion"
+    return MODELS_DIR / "champion"
+
+
 def get_engine():
     global _engine
     if _engine is None:
@@ -103,7 +143,7 @@ def get_engine():
 
 def load_model():
     global _model, _model_meta, _model_loaded_at, _explainer
-    champion_dir = MODELS_DIR / "champion"
+    champion_dir = _resolve_champion_dir()
     model_path = _model_path(champion_dir)
     meta_path = champion_dir / "model_metadata.json"
 

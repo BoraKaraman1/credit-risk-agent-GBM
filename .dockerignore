@@ -1,0 +1,23 @@
+.venv
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+.DS_Store
+
+.env
+.env.*
+
+notebooks
+tests
+*.ipynb
+
+# Heavy data layers — don't bake into images. Models stay (small, optional).
+data/bronze
+data/silver
+data/gold
+data/*.csv
+data/*.csv.gz
+data/.DS_Store
+data/models/mlruns
