@@ -16,7 +16,7 @@ End-to-end credit risk modeling pipeline built on Lending Club data (2.3M+ loans
                     └──────────────┬───────────────────┘
                                    │ orchestrates
                                    ▼
-LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           FASTAPI
+LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           RESTAPI
 ┌─────────────────────────┐          ┌─────────────────┐        ┌────────────┐
 │ data/                   │          │ applicant_feats │───────>│ POST /score│
 │   bronze/  (raw)        │──[GX]──> │ scoring_log     │        │ model +    │
