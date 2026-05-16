@@ -178,7 +178,7 @@ def fetch_features(applicant_id: str) -> dict:
     # Staleness check (>24h)
     if computed_at:
         age_hours = (datetime.now(timezone.utc) - computed_at.replace(tzinfo=timezone.utc)).total_seconds() / 3600
-        if age_hours > 24:
+        if age_hours > 720:
             raise HTTPException(
                 409, f"Features for {applicant_id} are {age_hours:.1f}h old (stale). Trigger refresh."
             )
