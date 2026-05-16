@@ -66,6 +66,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           RESTAPI
 │   ├── drift_monitor.py          # PSI/CSI drift detection
 │   ├── performance_monitor.py    # AUC/KS degradation tracking
 │   ├── retrain_orchestrator.py   # Automated retraining pipeline
+│   ├── db_logging.py             # Shared JSONB audit-log inserts
 │   └── config.py                 # Shared thresholds and paths
 ├── dags/
 │   ├── credit_risk_pipeline.py   # Monthly pipeline DAG
@@ -79,9 +80,21 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES           RESTAPI
 │   ├── test_pipeline.py          # Silver/Gold transform tests
 │   ├── test_features.py          # Feature engineering + drift metric tests
 │   ├── test_api.py               # API endpoint + adverse action tests
+│   ├── test_audit_logging_sql.py # JSONB audit logging SQL + optional DB test
 │   ├── test_fairness.py          # Fairness metric tests
 │   └── test_data_quality.py      # Data quality validation tests
-└── requirements.txt
+├── requirements/                 # Split dependency sets by runtime
+│   ├── api.txt                   # FastAPI scoring image
+│   ├── pipeline.txt              # Batch training/sync jobs
+│   ├── airflow.txt               # Airflow runtime
+│   ├── test.txt                  # Test runner
+│   └── dev.txt                   # Full local development install
+├── Dockerfile.api                # Lean scoring API container
+├── Dockerfile.pipeline           # Batch pipeline/training container
+├── Dockerfile.airflow            # Airflow DAG container
+├── Dockerfile.test               # Containerized test runner
+├── docker-compose.yml            # Local API + Postgres + audit test stack
+└── requirements.txt              # Backward-compatible dev install wrapper
 ```
 
 ## Setup
@@ -102,12 +115,30 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+`requirements.txt` installs the full development environment. For narrower installs, use:
+
+| File | Purpose |
+|------|---------|
+| `requirements/api.txt` | Scoring API runtime |
+| `requirements/pipeline.txt` | Batch pipeline, MLflow, data quality |
+| `requirements/airflow.txt` | Airflow runtime |
+| `requirements/test.txt` | Test runner without Airflow |
+| `requirements/dev.txt` | Full local development environment |
+
 ### Environment
 
 Create a `.env` file:
 
 ```
 DATABASE_URL=postgresql://postgres.xxxx:password@aws-0-region.pooler.supabase.com:6543/postgres
+
+# Optional: used only by the Postgres JSONB integration test.
+# The test creates temporary tables and skips automatically when unset.
+TEST_DATABASE_URL=postgresql://postgres.xxxx:password@aws-0-region.pooler.supabase.com:6543/postgres
+
+# Optional runtime overrides.
+CREDIT_RISK_MODELS_DIR=data/models
+LOG_LEVEL=INFO
 ```
 
 ### Database Schema
@@ -197,6 +228,10 @@ Example response (truncated):
   ]
 }
 ```
+
+### Audit Logging
+
+Each scoring request writes an audit row to `scoring_log` with the feature snapshot stored as JSONB. Monitoring agents write PSI/AUC summaries to `drift_log`, also with JSONB details. These inserts use SQLAlchemy bind parameters with explicit `CAST(:param AS jsonb)` expressions so Postgres receives valid JSONB values without relying on inline `:param::jsonb` casts.
 
 ## Monitoring Agents
 
@@ -311,19 +346,79 @@ The pipeline includes a parcelling-based reject inference module (`pipeline/reje
 3. Retrains on the combined dataset with rejected samples weighted at 0.3
 4. Compares the augmented model to the champion and saves as challenger
 
+## Containers
+
+The project has separate images for the API, batch pipeline, Airflow, and tests. Runtime images do not copy `.env`, `.venv`, notebooks, raw data, or model artifacts; models and data should be mounted or supplied by the deployment environment.
+
+### API Image
+
+Build and run the scoring API:
+
+```bash
+docker build -f Dockerfile.api -t credit-risk-api .
+docker run --rm \
+  -p 8000:8000 \
+  -e DATABASE_URL=postgresql://credit_risk:credit_risk@host.docker.internal:5432/credit_risk \
+  -e CREDIT_RISK_MODELS_DIR=/models \
+  -v "$PWD/data/models:/models:ro" \
+  credit-risk-api
+```
+
+The API image runs as a non-root user and exposes `/health` as its Docker healthcheck. It expects a champion model under `${CREDIT_RISK_MODELS_DIR}/champion`.
+
+### Local Compose Stack
+
+Start local Postgres, initialize `pipeline/supabase_schema.sql`, and run the API against the mounted local champion model:
+
+```bash
+docker compose up --build postgres api
+```
+
+Run the JSONB audit logging integration test against the Compose Postgres database:
+
+```bash
+docker compose --profile test run --rm audit-tests
+```
+
+The `audit-tests` service creates temporary tables and does not modify permanent application tables.
+
+### Pipeline Image
+
+Build a batch job image for training/sync/fairness tasks:
+
+```bash
+docker build -f Dockerfile.pipeline -t credit-risk-pipeline .
+docker run --rm \
+  -e DATABASE_URL=postgresql://... \
+  -v "$PWD/data:/app/data" \
+  credit-risk-pipeline python pipeline/train.py
+```
+
+### Airflow Image
+
+`Dockerfile.airflow` packages the DAGs and project modules on top of the official Airflow Python 3.11 image. Use it when deploying DAGs into an Airflow stack; mount `data/` at `/opt/airflow/data` if the DAGs should read local artifacts.
+
 ## Tests
 
 ```bash
-pytest tests/ -v
+source .venv/bin/activate
+python -m pytest -q
 ```
 
-99 tests across 5 modules:
+101 tests across 6 modules:
 
 - `test_pipeline.py` — Silver parsing, target mapping, Gold feature engineering
 - `test_features.py` — PSI/CSI metrics, reject inference alignment, pseudo-labeling
 - `test_api.py` — API endpoints, decision logic, adverse action reasons, Pydantic schemas
+- `test_audit_logging_sql.py` — JSONB bind-parameter regression tests and optional Postgres round trip
 - `test_fairness.py` — Disparate impact, equal opportunity, statistical parity metrics
 - `test_data_quality.py` — Bronze/Silver/Gold validation with valid and invalid data
+
+The Postgres round-trip audit logging test is skipped unless `TEST_DATABASE_URL` is set:
+
+```bash
+TEST_DATABASE_URL=postgresql://... python -m pytest tests/test_audit_logging_sql.py -q
+```
 
 ## Key Design Decisions
 

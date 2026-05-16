@@ -1,0 +1,2 @@
+-r pipeline.txt
+apache-airflow>=2.8

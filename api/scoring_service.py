@@ -28,8 +28,15 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-MODELS_DIR = DATA_DIR / "models"
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = Path(os.environ.get("CREDIT_RISK_DATA_DIR", DEFAULT_DATA_DIR)).resolve()
+MODELS_DIR = Path(os.environ.get("CREDIT_RISK_MODELS_DIR", DATA_DIR / "models")).resolve()
 
 # Decision thresholds
 APPROVE_THRESHOLD = 0.15

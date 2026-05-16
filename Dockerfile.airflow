@@ -1,0 +1,12 @@
+FROM apache/airflow:2.8.4-python3.11
+
+ENV PYTHONPATH=/opt/airflow \
+    LOG_LEVEL=INFO
+
+COPY requirements/base.txt requirements/pipeline.txt /tmp/requirements/
+RUN pip install --no-cache-dir -r /tmp/requirements/pipeline.txt
+
+COPY --chown=airflow:0 dags/ /opt/airflow/dags/
+COPY --chown=airflow:0 agents/ /opt/airflow/agents/
+COPY --chown=airflow:0 api/ /opt/airflow/api/
+COPY --chown=airflow:0 pipeline/ /opt/airflow/pipeline/
