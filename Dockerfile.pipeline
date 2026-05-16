@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    LOG_LEVEL=INFO
+
+WORKDIR /app
+
+RUN groupadd --system app \
+    && useradd --system --gid app --create-home app
+
+COPY requirements/ ./requirements/
+RUN pip install --upgrade pip \
+    && pip install -r requirements/pipeline.txt
+
+COPY agents/ ./agents/
+COPY api/ ./api/
+COPY pipeline/ ./pipeline/
+
+USER app
+
+CMD ["python", "pipeline/train.py"]

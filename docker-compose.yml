@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: credit_risk
+      POSTGRES_USER: credit_risk
+      POSTGRES_PASSWORD: credit_risk
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./pipeline/supabase_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U credit_risk -d credit_risk"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      DATABASE_URL: postgresql://credit_risk:credit_risk@postgres:5432/credit_risk
+      CREDIT_RISK_MODELS_DIR: /models
+      LOG_LEVEL: INFO
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/models:/models:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+
+  audit-tests:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      TEST_DATABASE_URL: postgresql://credit_risk:credit_risk@postgres:5432/credit_risk
+    command: ["python", "-m", "pytest", "tests/test_audit_logging_sql.py", "-q"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
