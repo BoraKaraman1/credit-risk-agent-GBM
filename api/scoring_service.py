@@ -82,6 +82,13 @@ _model_loaded_at = None
 _explainer = None
 _engine = None
 
+SCORING_LOG_INSERT_SQL = text("""
+    INSERT INTO scoring_log
+        (applicant_id, model_version, feature_snapshot, score, decision)
+    VALUES
+        (:applicant_id, :model_version, CAST(:feature_snapshot AS jsonb), :score, :decision)
+""")
+
 
 def _model_path(directory):
     """Resolve model path with backward compat."""
@@ -126,6 +133,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Credit Risk Scoring API", version="1.0.0", lifespan=lifespan)
+
+
+def insert_scoring_log(conn, *, applicant_id: str, model_version: str,
+                       features: dict, score: float, decision: str) -> None:
+    """Insert one scoring audit record."""
+    conn.execute(
+        SCORING_LOG_INSERT_SQL,
+        {
+            "applicant_id": applicant_id,
+            "model_version": model_version,
+            "feature_snapshot": json.dumps(features),
+            "score": score,
+            "decision": decision,
+        },
+    )
 
 
 def fetch_features(applicant_id: str) -> dict:
@@ -218,20 +240,13 @@ def score_applicant(applicant_id: str) -> ScoreResponse:
     try:
         engine = get_engine()
         with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO scoring_log
-                        (applicant_id, model_version, feature_snapshot, score, decision)
-                    VALUES
-                        (:applicant_id, :model_version, :feature_snapshot::jsonb, :score, :decision)
-                """),
-                {
-                    "applicant_id": applicant_id,
-                    "model_version": _model_meta["version"],
-                    "feature_snapshot": json.dumps(features),
-                    "score": score,
-                    "decision": decision,
-                },
+            insert_scoring_log(
+                conn,
+                applicant_id=applicant_id,
+                model_version=_model_meta["version"],
+                features=features,
+                score=score,
+                decision=decision,
             )
     except Exception as e:
         logger.warning(f"Failed to log scoring decision: {e}")

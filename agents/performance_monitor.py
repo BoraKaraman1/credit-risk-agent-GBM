@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from sklearn.metrics import roc_auc_score, roc_curve
 from sqlalchemy import create_engine, text
 
+from agents.db_logging import insert_drift_log
 from agents.config import (
     MODELS_DIR, GOLD_DIR, SUPABASE_DB_URL, AUC_DROP_THRESHOLD,
 )
@@ -141,20 +142,15 @@ def run():
         try:
             engine = create_engine(SUPABASE_DB_URL)
             with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                        INSERT INTO drift_log (metric_name, metric_value, model_version, details)
-                        VALUES (:metric_name, :metric_value, :model_version, :details::jsonb)
-                    """),
-                    {
-                        "metric_name": "auc",
-                        "metric_value": current_auc,
-                        "model_version": meta["version"],
-                        "details": json.dumps({
-                            "auc_drop": round(auc_drop, 4),
-                            "ks": current_metrics["ks"],
-                            "rank_order_breaks": rank_order_breaks,
-                        }),
+                insert_drift_log(
+                    conn,
+                    metric_name="auc",
+                    metric_value=current_auc,
+                    model_version=meta["version"],
+                    details={
+                        "auc_drop": round(auc_drop, 4),
+                        "ks": current_metrics["ks"],
+                        "rank_order_breaks": rank_order_breaks,
                     },
                 )
         except Exception as e:
