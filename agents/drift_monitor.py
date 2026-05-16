@@ -13,6 +13,7 @@ import pandas as pd
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, text
 
+from agents.db_logging import insert_drift_log
 from agents.config import (
     MODELS_DIR, GOLD_DIR, SUPABASE_DB_URL,
     PSI_WARNING, PSI_CRITICAL, CSI_THRESHOLD,
@@ -166,19 +167,14 @@ def run(production_scores=None, production_features=None):
         try:
             engine = create_engine(SUPABASE_DB_URL)
             with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                        INSERT INTO drift_log (metric_name, metric_value, model_version, details)
-                        VALUES (:metric_name, :metric_value, :model_version, :details::jsonb)
-                    """),
-                    {
-                        "metric_name": "psi",
-                        "metric_value": psi,
-                        "model_version": meta["version"],
-                        "details": json.dumps({
-                            "csi": csi_results,
-                            "drifted_features": list(report["drifted_features"].keys()),
-                        }),
+                insert_drift_log(
+                    conn,
+                    metric_name="psi",
+                    metric_value=psi,
+                    model_version=meta["version"],
+                    details={
+                        "csi": csi_results,
+                        "drifted_features": list(report["drifted_features"].keys()),
                     },
                 )
             logger.info("Results logged to drift_log table")
