@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/BoraKaraman1/credit-risk-agent-GBM/actions/workflows/ci.yml/badge.svg)](https://github.com/BoraKaraman1/credit-risk-agent-GBM/actions/workflows/ci.yml)
 
-> **TL;DR:** Production-grade credit risk pipeline scoring 2.3M+ Lending Club loans — featuring a medallion data architecture, SHAP-based regulatory-compliant adverse action reasons, automated drift monitoring, and fairness analysis. Training runs in Python (LightGBM); serving and monitoring run as static Go binaries with pure-Go GBM inference and TreeSHAP. Test AUC of 0.717 on origination-only features (upper end for this dataset, where typical models achieve 0.68–0.73).
+> **TL;DR:** Credit risk pipeline trained on 2.3M+ Lending Club loans. Python runs training (LightGBM); Go runs scoring and monitoring as static binaries with pure-Go inference and TreeSHAP. Test AUC 0.717 on origination-only features, toward the top of what this dataset supports (typical range: 0.68–0.73).
 
 ---
 
-End-to-end credit risk modeling pipeline built on Lending Club data (2.3M+ loans). Implements a medallion architecture (Bronze/Silver/Gold), gradient boosting model training, a real-time scoring API with SHAP-based adverse action reasons, automated drift monitoring, fairness analysis, data quality validation, and Airflow orchestration — all on free-tier infrastructure.
+Credit risk pipeline built on Lending Club data (2.3M+ loans). It runs a Bronze/Silver/Gold medallion architecture, trains a LightGBM model, serves scores through a real-time API with SHAP-based adverse action reasons, monitors for drift, runs fairness analysis, and orchestrates everything through Airflow. All on free-tier infrastructure.
 
-The system is split across two runtimes: **Python** owns everything that needs the scientific stack (data prep, LightGBM training, fairness, Great Expectations, Airflow DAG definitions), while **Go** owns the serving layer (`go/`) — the scoring API, drift/performance monitors, retrain orchestration, and feature-store sync. The trained model is exported to a library-agnostic JSON tree format (`pipeline/export_model_json.py`) and the Go services run inference and TreeSHAP natively, with no Python at serving time. Go outputs are verified against the Python stack: predictions to 1e-9 vs LightGBM, SHAP values to 1e-6 vs the `shap` library.
+**Python** owns everything that needs the scientific stack: data prep, LightGBM training, fairness analysis, Great Expectations, and Airflow DAG definitions. **Go** owns the serving layer (`go/`): the scoring API, drift/performance monitors, retrain orchestration, and feature-store sync. After training, the model is exported to a library-agnostic JSON tree format (`pipeline/export_model_json.py`); Go runs inference and TreeSHAP natively with no Python at serving time. Predictions match LightGBM to 1e-9 and SHAP values match the `shap` library to 1e-6.
 
 ## Architecture
 
@@ -42,12 +42,12 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 | Data storage | Local Parquet (medallion layers) |
 | Database | Supabase PostgreSQL (free tier) |
 | Model | LightGBM binary classifier (training) |
-| Serving | Go 1.26 — pure-Go GBM inference from a JSON model export |
+| Serving | Go 1.26, pure-Go GBM inference from a JSON model export |
 | API | Go `net/http` (`go/cmd/scoring-api`) |
 | Orchestration | Apache Airflow |
 | Data quality | Great Expectations |
 | Experiment tracking | MLflow (local) |
-| Interpretability | TreeSHAP (adverse action reasons) — Python `shap` for analysis, pure-Go implementation at serving time |
+| Interpretability | TreeSHAP (adverse action reasons): Python `shap` for analysis, pure-Go implementation at serving time |
 | Fairness | Disparate Impact, Equal Opportunity, Statistical Parity |
 | Monitoring | Go agents (PSI, CSI, AUC tracking) |
 
@@ -137,7 +137,7 @@ cd go && go build -o bin/ ./cmd/... && cd ..
 | `requirements/test.txt` | Test runner without Airflow |
 | `requirements/dev.txt` | Full local development environment (incl. SHAP for notebooks) |
 
-The scoring API has no Python dependencies — it is a Go binary (see `go/README.md`).
+The scoring API has no Python dependencies; it is a Go binary (see `go/README.md`).
 
 ### Environment
 
@@ -224,7 +224,7 @@ curl -X POST http://localhost:8000/reload
 
 ### Adverse Action Reasons (ECOA)
 
-For decline and manual-review decisions, the API returns the top 4 SHAP-based adverse action reasons — as required by the Equal Credit Opportunity Act (Regulation B). Each reason includes:
+For decline and manual-review decisions, the API returns the top 4 SHAP-based adverse action reasons, as required by ECOA (Regulation B). Each reason includes:
 
 - Human-readable feature name (e.g., "Debt-to-Income Ratio")
 - SHAP contribution value (how much the feature pushed the score toward default)
@@ -321,9 +321,9 @@ Evaluates model fairness across three proxy-protected attributes:
 
 Three metrics are computed per attribute:
 
-- **Disparate Impact Ratio (DIR)** — Approval rate ratio between unprivileged and privileged groups. Flags violations of the 80% four-fifths rule.
-- **Equal Opportunity Difference (EOD)** — Gap in true positive rates (P(approve | non-defaulter)) between groups.
-- **Statistical Parity Difference (SPD)** — Gap in raw approval rates between groups.
+- **Disparate Impact Ratio (DIR):** Approval rate ratio between unprivileged and privileged groups. Flags violations of the 80% four-fifths rule.
+- **Equal Opportunity Difference (EOD):** Gap in true positive rates (P(approve | non-defaulter)) between groups.
+- **Statistical Parity Difference (SPD):** Gap in raw approval rates between groups.
 
 ```bash
 python -m pipeline.fairness
@@ -341,7 +341,7 @@ Great Expectations validates data at each medallion layer:
 | Silver | Core columns non-null, FICO 300-850, income >= 0, DTI 0-100, binary target, default rate 5-50% |
 | Gold | All 33 features present, `grade_numeric` 1-7, `sub_grade_numeric` 1-35, binary flags 0/1, row count > 1000 |
 
-Validation runs automatically at the end of each pipeline step. Great Expectations is an optional dependency — the pipeline still works without it installed.
+Validation runs automatically at the end of each pipeline step. Great Expectations is optional; the pipeline still works without it.
 
 ```bash
 # Validate existing Gold data manually
@@ -441,11 +441,11 @@ The Go tests cross-check against fixtures generated by the Python stack: sklearn
 
 - **No data leakage**: Only 25 origination-time columns are used. Post-origination features (payments, recoveries) are excluded.
 - **Time-aware splitting**: Train/val/test split by loan issue date, not random. This mimics real deployment where the model is trained on historical data and evaluated on newer loans.
-- **LightGBM**: The de facto standard GBM in credit scoring — fast histogram-based training with explicit validation-set early stopping. Requires OpenMP (`brew install libomp` on macOS; bundled in the Linux containers). The model is exported to a library-agnostic JSON tree format, so the Go serving layer is unaffected by the training-library choice.
+- **LightGBM**: What credit risk teams actually use. Fast histogram-based training with explicit validation-set early stopping. Requires OpenMP (`brew install libomp` on macOS; bundled in the Linux containers). The model is exported to a library-agnostic JSON tree format, so the Go serving layer is unaffected by the training-library choice.
 - **Sample-weighted reject inference**: Pseudo-labeled rejected applicants are weighted at 0.3 to prevent uncertain labels from dominating the training signal.
 - **Human-in-the-loop retraining**: The retrain orchestrator recommends but does not auto-promote models (SR 11-7 compliance).
-- **SHAP for adverse actions**: TreeSHAP provides exact, model-consistent explanations — more reliable than surrogate models or generic reason-code tables for ECOA compliance. The serving implementation is pure Go, verified to 1e-6 against the Python `shap` library.
-- **Go serving layer**: The model is exported to a JSON tree format once after training; the API and monitors run inference natively. This removes the scientific-Python stack from serving images (smaller containers, static binaries, parallel batch scoring) while keeping training in sklearn. Superseded Python services are kept in `backup_python/` for reference.
+- **SHAP for adverse actions**: TreeSHAP provides exact, model-consistent explanations, more reliable than surrogate models or generic reason-code tables for ECOA compliance. The serving implementation is pure Go, verified to 1e-6 against the Python `shap` library.
+- **Go serving layer**: The model is exported to a JSON tree format once after training; the API and monitors run inference natively. Serving images drop the scientific-Python stack entirely (one static binary on a slim base) while training stays in Python. Superseded Python services are kept in `backup_python/` for reference.
 - **Fairness via proxy attributes**: Direct protected classes (race, gender) are unavailable in the data. Analysis uses proxy attributes (home ownership, verification status, employment reporting) to detect potential disparate impact.
-- **Data quality as optional dependency**: Great Expectations validation is wrapped in `try/except ImportError` so the core pipeline remains functional without it — useful for lightweight dev environments.
-- **joblib over pickle**: Faster serialization for numpy-heavy sklearn models, smaller files, and recommended by scikit-learn. Backward-compatible fallback to `.pkl` for pre-migration models.
+- **Data quality as optional dependency**: Great Expectations validation is wrapped in `try/except ImportError` so the core pipeline works without it. Useful for lightweight dev environments.
+- **joblib over pickle**: Faster and smaller than pickle for numpy-heavy sklearn models, and the serialization method scikit-learn recommends. Backward-compatible fallback to `.pkl` for pre-migration models.
