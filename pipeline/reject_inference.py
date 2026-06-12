@@ -17,8 +17,9 @@ import pandas as pd
 import numpy as np
 import mlflow
 import mlflow.sklearn
-from sklearn.ensemble import HistGradientBoostingClassifier
+import lightgbm as lgb
 from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -133,33 +134,42 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
         np.full(len(X_rejected), REJECT_SAMPLE_WEIGHT),
     ])
 
-    # Combine with val for early stopping
+    # Same data usage as the champion: val joins the training pool and a
+    # random stratified carve-out drives early stopping.
     X_all = pd.concat([X_combined, X_val], ignore_index=True)
     y_all = pd.concat([y_combined, y_val], ignore_index=True)
     weights_all = np.concatenate([sample_weights, np.ones(len(X_val))])
     val_fraction = len(X_val) / len(X_all)
 
+    X_fit, X_es, y_fit, y_es, w_fit, _ = train_test_split(
+        X_all, y_all, weights_all, test_size=val_fraction,
+        random_state=42, stratify=y_all,
+    )
+
     logger.info(f"Combined training set: {len(X_combined):,} rows "
                 f"(accepted={len(X_accepted):,}, rejected={len(X_rejected):,})")
 
-    model = HistGradientBoostingClassifier(
-        max_iter=1000,
+    model = lgb.LGBMClassifier(
+        n_estimators=1000,
         max_depth=6,
         learning_rate=0.05,
-        max_leaf_nodes=63,
-        min_samples_leaf=20,
-        l2_regularization=1.0,
-        max_bins=255,
-        early_stopping=True,
-        validation_fraction=val_fraction,
-        n_iter_no_change=50,
-        scoring="roc_auc",
+        num_leaves=63,
+        min_child_samples=20,
+        reg_lambda=1.0,
+        max_bin=255,
         random_state=42,
-        verbose=1,
+        n_jobs=-1,
+        verbose=-1,
     )
 
-    model.fit(X_all, y_all, sample_weight=weights_all)
-    logger.info(f"Augmented model iterations: {model.n_iter_}")
+    model.fit(
+        X_fit, y_fit,
+        sample_weight=w_fit,
+        eval_set=[(X_es, y_es)],
+        eval_metric="auc",
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+    logger.info(f"Augmented model iterations: {model.best_iteration_}")
 
     return model
 

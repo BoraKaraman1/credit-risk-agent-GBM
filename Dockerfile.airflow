@@ -10,6 +10,12 @@ RUN CGO_ENABLED=0 go build -o /out/ ./cmd/...
 
 FROM apache/airflow:2.8.4-python3.11
 
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+USER airflow
+
 ENV PYTHONPATH=/opt/airflow \
     LOG_LEVEL=INFO \
     CREDIT_RISK_GO_BIN=/opt/airflow/bin \

@@ -1,7 +1,7 @@
 """
 Challenger Training Entry Point
 Invoked by the Go retrain orchestrator (go/cmd/retrain-orchestrator).
-Trains a challenger HistGradientBoostingClassifier, saves it to
+Trains a challenger LightGBM model, saves it to
 data/models/challenger, and exports model.json for the Go runtime.
 
 Logs go to stderr; stdout carries a single JSON result for the caller.
@@ -15,8 +15,9 @@ import logging
 import sys
 from pathlib import Path
 
+import lightgbm as lgb
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -32,28 +33,37 @@ def main(version):
 
     # Slightly different hyperparams for challenger (exploring the space)
     challenger_params = {
-        "max_iter": 1200,
+        "n_estimators": 1200,
         "max_depth": 7,
         "learning_rate": 0.03,
-        "max_leaf_nodes": 63,
-        "min_samples_leaf": 30,
-        "l2_regularization": 2.0,
-        "max_bins": 255,
-        "early_stopping": True,
-        "validation_fraction": len(X_val) / (len(X_train) + len(X_val)),
-        "n_iter_no_change": 50,
-        "scoring": "roc_auc",
+        "num_leaves": 63,
+        "min_child_samples": 30,
+        "reg_lambda": 2.0,
+        "max_bin": 255,
         "random_state": 42,
-        "verbose": 0,
+        "n_jobs": -1,
+        "verbose": -1,
     }
 
+    # Same data usage as the champion: train+val combined, random
+    # stratified carve-out for early stopping.
     combined_X = pd.concat([X_train, X_val], ignore_index=True)
     combined_y = pd.concat([y_train, y_val], ignore_index=True)
+    val_fraction = len(X_val) / len(combined_X)
+    X_fit, X_es, y_fit, y_es = train_test_split(
+        combined_X, combined_y, test_size=val_fraction,
+        random_state=42, stratify=combined_y,
+    )
 
     logger.info("Training challenger model ...")
-    model = HistGradientBoostingClassifier(**challenger_params)
-    model.fit(combined_X, combined_y)
-    logger.info(f"Challenger trained. Iterations: {model.n_iter_}")
+    model = lgb.LGBMClassifier(**challenger_params)
+    model.fit(
+        X_fit, y_fit,
+        eval_set=[(X_es, y_es)],
+        eval_metric="auc",
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
+    logger.info(f"Challenger trained. Iterations: {model.best_iteration_}")
 
     test_metrics = evaluate_model(model, X_test, y_test, "test")
     save_model(model, feature_cols, {"test": test_metrics}, version, MODELS_DIR / "challenger")
@@ -61,7 +71,7 @@ def main(version):
 
     print(json.dumps({
         "version": version,
-        "n_iterations": int(model.n_iter_),
+        "n_iterations": int(model.best_iteration_ or model.n_estimators_),
         "params": {k: str(v) for k, v in challenger_params.items()},
         "test_metrics": test_metrics,
     }))

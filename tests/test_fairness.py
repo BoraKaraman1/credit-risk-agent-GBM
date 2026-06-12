@@ -6,7 +6,7 @@ Uses synthetic data — does not require real data files or trained models.
 import pytest
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier
+import lightgbm as lgb
 
 from pipeline.fairness import (
     compute_disparate_impact,
@@ -42,7 +42,7 @@ def _make_fairness_data(n=600, seed=42):
 
 
 def _train_dummy_model(X, y):
-    model = HistGradientBoostingClassifier(max_iter=10, max_depth=3, random_state=42)
+    model = lgb.LGBMClassifier(n_estimators=10, max_depth=3, random_state=42, verbose=-1)
     model.fit(X, y)
     return model
 

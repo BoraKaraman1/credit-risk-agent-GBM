@@ -1,5 +1,96 @@
 # Changelog
 
+## [2.1.0] - 2026-06-13
+
+### Overview
+
+Migrated the model from scikit-learn's `HistGradientBoostingClassifier` to **LightGBM** — the de facto industry standard GBM in credit scoring — without touching a single line of the Go serving layer. The model export was redesigned as a library-agnostic JSON tree format, so the Go runtime proved its independence from the training library: all parity tests pass unchanged. The Go test suite was also expanded from 12 to 154 tests.
+
+---
+
+### Changed
+
+#### LightGBM Training (`pipeline/train.py`, `train_challenger.py`, `reject_inference.py`)
+- All three training paths now use `lgb.LGBMClassifier` with AUC-based early stopping (patience 50) on an explicit eval set.
+- Data usage preserved from the previous champion: train+val combined with a stratified random carve-out for early stopping. (A first attempt that trained on the train split only dropped test AUC to 0.7053 — with a temporal split, the val period carries the most recent signal.)
+- New champion **v1.2**: 940 trees, test AUC 0.7168 / KS 0.3164 — statistically on par with the previous champion (0.7180 / 0.3182).
+- **Why it matters:** LightGBM is what credit risk teams actually deploy; native categorical support and faster training open future feature work. The near-identical AUC confirms the previous model family was already at this dataset's ceiling.
+
+#### Library-Agnostic Model Export (`pipeline/export_model_json.py`)
+- Rewritten to flatten LightGBM's nested tree dump into the existing columnar JSON format the Go runtime executes: `value <= threshold` goes left, NaN follows `missing_go_to_left`.
+- Handles LightGBM-specific semantics: truncation to `best_iteration_` when early stopping fires, `default_left` for NaN-aware splits, NaN-treated-as-zero for splits that never saw missing values (`missing_type: None`), and the baked-in baseline measured empirically.
+- The exporter **refuses to export** unless the flattened trees reproduce LightGBM's raw scores to 1e-9 on a randomized check set.
+- **Why it matters:** The Go serving layer required zero changes — predictions match LightGBM to 1e-9 and Go TreeSHAP matches the Python `shap` library to 1e-6 on regenerated fixtures. The serving layer is now provably decoupled from the training library.
+
+#### OpenMP Runtime Dependency
+- LightGBM requires OpenMP: `Dockerfile.pipeline`, `Dockerfile.test`, and `Dockerfile.airflow` now install `libgomp1` (absent from slim/Airflow base images). On macOS, `brew install libomp`.
+
+---
+
+### Tests
+
+- **Go suite expanded from 12 to 154 tests**: hand-verified metric edge cases (histogram bin semantics, quantile interpolation, ROC-AUC midrank ties, KS, decile rank-order breaks), synthetic hand-built trees with analytically exact SHAP values, model loader error paths, a parquet write→read round-trip, config env handling, and HTTP handler tests (`httptest`).
+- Decision thresholds extracted into a testable `decide()` function in the scoring API.
+- Python suite: 79 tests passing on LightGBM.
+
+---
+
+### Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `lightgbm` | ≥ 4.0 | Gradient boosting (replaces sklearn HistGradientBoosting) |
+
+---
+
+## [2.0.0] - 2026-06-12
+
+### Overview
+
+**Forked the serving layer to Go.** The scoring API, drift/performance monitors, retrain orchestrator, and feature-store sync now run as five static Go binaries with pure-Go GBM inference and TreeSHAP — no Python at serving time. Training, fairness analysis, data quality validation, and Airflow DAG definitions stay in Python. The superseded Python services are preserved in `backup_python/`.
+
+---
+
+### New Features
+
+#### Go Serving Layer (`go/`)
+- **`cmd/scoring-api`** — `net/http` port of the FastAPI service: `/score`, `/score/batch`, `/health`, `/reload`, with identical decision thresholds, ECOA adverse action reasons, and `scoring_log` audit inserts.
+- **`cmd/drift-monitor`**, **`cmd/performance-monitor`** — PSI/CSI and AUC/KS/Gini/decile monitoring with the same Supabase-or-test-set fallback logic and `drift_log` writes.
+- **`cmd/retrain-orchestrator`** — shells out to Python for the model fit, then evaluates champion vs challenger natively (AUC/KS/Gini + score PSI) and emits the SR 11-7 review report.
+- **`cmd/supabase-sync`** — bulk feature upsert (multi-row `unnest` INSERT) plus the training score distribution used as the PSI reference.
+- **`internal/model`** — loads a JSON export of the champion's trees and implements `predict_proba` (parallel batch scoring) and **path-dependent TreeSHAP** (Lundberg et al., Algorithm 2) in pure Go.
+- **Why it matters:** The serving image drops from a full scientific-Python stack to one static binary on a slim base — smaller attack surface, faster cold starts, and parallel batch scoring (831K rows in ~7s).
+
+#### Model JSON Export (`pipeline/export_model_json.py`)
+- One-time export of the trained model's trees (nodes, thresholds, missing directions, covers, baseline) to `model.json` for the Go runtime.
+
+#### Verified Cross-Language Parity
+- Predictions match the Python stack to **1e-9**; TreeSHAP adverse-action values match the `shap` library to **1e-6**, including rows with missing values.
+- Drift monitor PSI and all 33 CSI values bit-identical to the Python agents; recommendation strings equal.
+- Live side-by-side API comparison: identical scores (5 decimals), decisions, adverse actions, and audit rows against the same Supabase instance.
+
+---
+
+### Changed
+
+- **Airflow DAGs** now shell out to the Go binaries (`/opt/airflow/bin`) and parse their JSON reports; the pipeline DAG gained an `export_model_json` task between train and sync.
+- **`Dockerfile.api`** is a Go multi-stage build (no Python in the image); **`Dockerfile.airflow`** packages the Go binaries alongside the DAGs; pipeline/test images dropped the moved directories.
+- **Requirements** slimmed: `api.txt` removed (the API has no Python dependencies); `sqlalchemy`, `psycopg2-binary`, and `python-dotenv` dropped from `base.txt` (database access moved to Go/pgx); `httpx` dropped; `shap` moved to dev (notebooks).
+- **`docker-compose.yml`**: `audit-tests` service removed (its test moved to backup with the code it tested).
+
+### Moved to `backup_python/`
+
+`api/` (FastAPI service), `agents/` (drift, performance, retrain, config, db_logging), `pipeline/sync_to_supabase.py`, `tests/test_api.py`, `tests/test_audit_logging_sql.py`, and a self-contained `requirements-api.txt`.
+
+---
+
+### Tests
+
+- Go test suites cross-check against fixtures generated by the Python stack: sklearn `predict_proba`, `shap` TreeSHAP values, numpy PSI/CSI, sklearn AUC/KS, pandas decile analysis.
+- Python suite: 79 tests passing (API and audit-SQL tests moved to backup with their code; PSI/CSI coverage moved to Go).
+
+---
+
 ## [1.1.0] - 2026-04-15
 
 ### Overview

@@ -1,7 +1,8 @@
-// Package model loads a HistGradientBoostingClassifier exported by
+// Package model loads a gradient-boosted tree model exported by
 // pipeline/export_model_json.py and provides pure-Go inference plus
-// TreeSHAP explanations. Only binary classification with numeric
-// splits is supported (the exporter rejects anything else).
+// TreeSHAP explanations. The JSON format is library-agnostic (the
+// exporter currently normalizes LightGBM dumps); only binary
+// classification with numeric splits is supported.
 package model
 
 import (
