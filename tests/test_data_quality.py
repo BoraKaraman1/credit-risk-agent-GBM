@@ -3,7 +3,6 @@ Tests for the data quality validation module.
 Uses synthetic DataFrames — does not require real data files.
 """
 
-import pytest
 import pandas as pd
 import numpy as np
 
@@ -11,7 +10,6 @@ from pipeline.data_quality import (
     validate_bronze,
     validate_silver,
     validate_gold,
-    BINARY_COLUMNS,
 )
 
 

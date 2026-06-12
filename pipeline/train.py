@@ -14,7 +14,6 @@ import mlflow.sklearn
 import lightgbm as lgb
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
-from sklearn.calibration import calibration_curve
 from pathlib import Path
 from datetime import datetime, timezone
 

@@ -3,13 +3,8 @@ Tests for the data pipeline: Bronze → Silver → Gold transformations.
 Uses small synthetic DataFrames — does not require real data files.
 """
 
-import pytest
 import pandas as pd
 import numpy as np
-import json
-from pathlib import Path
-from unittest.mock import patch
-from datetime import datetime
 
 # --- Silver transform unit tests ---
 

@@ -289,7 +289,7 @@ def format_report(report: dict) -> str:
 
         # SPD
         spd = attr_result["statistical_parity_diff"]
-        lines.append(f"\nStatistical Parity Differences:")
+        lines.append("\nStatistical Parity Differences:")
         for group, diff in spd.items():
             lines.append(f"  {group}: {diff:+.4f}")
 

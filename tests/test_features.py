@@ -6,7 +6,6 @@ Uses synthetic data — does not require real data files or trained models.
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import MagicMock
 import lightgbm as lgb
 
 from pipeline.reject_inference import (
@@ -16,7 +15,6 @@ from pipeline.reject_inference import (
     compute_ks,
     REJECT_DEFAULT_MULTIPLIER,
     REJECT_DEFAULT_CAP,
-    REJECT_SAMPLE_WEIGHT,
 )
 from pipeline.train import compute_gini
 

@@ -1,0 +1,3 @@
+[lint.per-file-ignores]
+# Test files group imports next to the test sections they belong to.
+"tests/*" = ["E402"]

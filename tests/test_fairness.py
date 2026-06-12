@@ -17,8 +17,6 @@ from pipeline.fairness import (
     run as run_fairness,
     format_report,
     DIR_THRESHOLD,
-    APPROVE_THRESHOLD,
-    PROTECTED_ATTRIBUTES,
 )
 
 
