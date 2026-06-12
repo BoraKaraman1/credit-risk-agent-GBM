@@ -1,7 +1,7 @@
 """
 Training Pipeline
 Trains a gradient boosting model on Gold features, logs to MLflow, manages champion/challenger.
-Uses sklearn HistGradientBoostingClassifier (XGBoost-equivalent, no OpenMP dependency).
+Uses LightGBM (industry-standard GBM; requires OpenMP — `brew install libomp` on macOS).
 """
 
 import json
@@ -11,8 +11,9 @@ import pandas as pd
 import numpy as np
 import mlflow
 import mlflow.sklearn
-from sklearn.ensemble import HistGradientBoostingClassifier
+import lightgbm as lgb
 from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.model_selection import train_test_split
 from sklearn.calibration import calibration_curve
 from pathlib import Path
 from datetime import datetime, timezone
@@ -62,35 +63,40 @@ def load_gold_data():
 
 
 def train_model(X_train, y_train, X_val, y_val, params=None):
-    """Train HistGradientBoosting with early stopping on validation set."""
+    """Train LightGBM on train+val with a random stratified carve-out for
+    early stopping (same data usage as the previous champion: with a
+    temporal split, the val period carries the most recent signal)."""
     if params is None:
         params = {
-            "max_iter": 1000,
+            "n_estimators": 1000,
             "max_depth": 6,
             "learning_rate": 0.05,
-            "max_leaf_nodes": 63,
-            "min_samples_leaf": 20,
-            "l2_regularization": 1.0,
-            "max_bins": 255,
-            "early_stopping": True,
-            "validation_fraction": None,
-            "n_iter_no_change": 50,
-            "scoring": "roc_auc",
+            "num_leaves": 63,
+            "min_child_samples": 20,
+            "reg_lambda": 1.0,
+            "max_bin": 255,
             "random_state": 42,
-            "verbose": 1,
+            "n_jobs": -1,
+            "verbose": -1,
         }
 
     combined_X = pd.concat([X_train, X_val], ignore_index=True)
     combined_y = pd.concat([y_train, y_val], ignore_index=True)
     val_fraction = len(X_val) / len(combined_X)
+    X_fit, X_es, y_fit, y_es = train_test_split(
+        combined_X, combined_y, test_size=val_fraction,
+        random_state=42, stratify=combined_y,
+    )
 
-    params["validation_fraction"] = val_fraction
-    params["early_stopping"] = True
+    model = lgb.LGBMClassifier(**params)
+    model.fit(
+        X_fit, y_fit,
+        eval_set=[(X_es, y_es)],
+        eval_metric="auc",
+        callbacks=[lgb.early_stopping(50, verbose=False)],
+    )
 
-    model = HistGradientBoostingClassifier(**params)
-    model.fit(combined_X, combined_y)
-
-    logger.info(f"Best iteration: {model.n_iter_}")
+    logger.info(f"Best iteration: {model.best_iteration_}")
 
     return model, params
 
@@ -138,7 +144,7 @@ def run(as_challenger=False):
     logger.info(f"Train={len(X_train):,}  Val={len(X_val):,}  Test={len(X_test):,}")
 
     with mlflow.start_run():
-        logger.info("Training HistGradientBoosting ...")
+        logger.info("Training LightGBM ...")
         model, params = train_model(X_train, y_train, X_val, y_val)
 
         # Log params (convert non-string values for MLflow)
@@ -147,7 +153,7 @@ def run(as_challenger=False):
         mlflow.log_param("n_train", len(X_train))
         mlflow.log_param("n_val", len(X_val))
         mlflow.log_param("n_test", len(X_test))
-        mlflow.log_param("n_iterations", model.n_iter_)
+        mlflow.log_param("n_iterations", model.best_iteration_ or model.n_estimators_)
 
         # Evaluate on all splits
         train_metrics = evaluate_model(model, X_train, y_train, "train")

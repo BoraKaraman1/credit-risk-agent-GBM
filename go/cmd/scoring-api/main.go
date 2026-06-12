@@ -156,6 +156,18 @@ func round(x float64, decimals int) float64 {
 	return math.Round(x*p) / p
 }
 
+// decide maps a probability of default to a credit decision.
+func decide(score float64) string {
+	switch {
+	case score < config.ApproveThreshold:
+		return "approve"
+	case score < config.ReviewThreshold:
+		return "review"
+	default:
+		return "decline"
+	}
+}
+
 func computeAdverseActions(m *model.Model, x []float64, features map[string]*float64) []adverseAction {
 	shapValues := m.ShapValues(x)
 	order := make([]int, len(shapValues))
@@ -225,16 +237,7 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 	}
 
 	score := m.PredictProba(x)
-
-	var decision string
-	switch {
-	case score < config.ApproveThreshold:
-		decision = "approve"
-	case score < config.ReviewThreshold:
-		decision = "review"
-	default:
-		decision = "decline"
-	}
+	decision := decide(score)
 
 	// ECOA adverse action reasons (only for decline/review)
 	actions := []adverseAction{}

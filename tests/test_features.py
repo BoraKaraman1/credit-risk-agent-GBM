@@ -7,7 +7,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock
-from sklearn.ensemble import HistGradientBoostingClassifier
+import lightgbm as lgb
 
 from pipeline.reject_inference import (
     align_rejected_features,
@@ -34,8 +34,8 @@ def _make_feature_data(n=500, n_features=10, seed=42):
 
 def _train_dummy_model(X, y):
     """Train a quick model for testing."""
-    model = HistGradientBoostingClassifier(
-        max_iter=10, max_depth=3, random_state=42
+    model = lgb.LGBMClassifier(
+        n_estimators=10, max_depth=3, random_state=42, verbose=-1
     )
     model.fit(X, y)
     return model
@@ -183,10 +183,10 @@ class TestCompareModels:
 # --- Training utility tests ---
 
 class TestTrainModel:
-    def test_hist_gbm_trains(self):
+    def test_lightgbm_trains(self):
         X, y, _ = _make_feature_data(n=200)
-        model = HistGradientBoostingClassifier(
-            max_iter=10, max_depth=3, random_state=42
+        model = lgb.LGBMClassifier(
+            n_estimators=10, max_depth=3, random_state=42, verbose=-1
         )
         model.fit(X, y)
         probs = model.predict_proba(X)[:, 1]
@@ -196,8 +196,8 @@ class TestTrainModel:
     def test_sample_weights_accepted(self):
         X, y, _ = _make_feature_data(n=200)
         weights = np.concatenate([np.ones(150), np.full(50, 0.3)])
-        model = HistGradientBoostingClassifier(
-            max_iter=10, max_depth=3, random_state=42
+        model = lgb.LGBMClassifier(
+            n_estimators=10, max_depth=3, random_state=42, verbose=-1
         )
         model.fit(X, y, sample_weight=weights)
-        assert model.n_iter_ > 0
+        assert model.n_estimators_ > 0
