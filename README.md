@@ -1,5 +1,7 @@
 # Credit Risk Scoring Pipeline
 
+[![CI](https://github.com/BoraKaraman1/credit-risk-agent-GBM/actions/workflows/ci.yml/badge.svg)](https://github.com/BoraKaraman1/credit-risk-agent-GBM/actions/workflows/ci.yml)
+
 > **TL;DR:** Production-grade credit risk pipeline scoring 2.3M+ Lending Club loans — featuring a medallion data architecture, SHAP-based regulatory-compliant adverse action reasons, automated drift monitoring, and fairness analysis. Training runs in Python (LightGBM); serving and monitoring run as static Go binaries with pure-Go GBM inference and TreeSHAP. Test AUC of 0.717 on origination-only features (upper end for this dataset, where typical models achieve 0.68–0.73).
 
 ---
