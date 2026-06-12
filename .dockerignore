@@ -14,6 +14,9 @@ data/
 notebooks/
 *.ipynb
 
+backup_python/
+go/bin/
+
 Dockerfile*
 docker-compose*.yml
 README.md

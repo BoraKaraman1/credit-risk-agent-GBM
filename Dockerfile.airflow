@@ -1,12 +1,24 @@
+FROM golang:1.26 AS gobuild
+
+WORKDIR /src
+
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -o /out/ ./cmd/...
+
 FROM apache/airflow:2.8.4-python3.11
 
 ENV PYTHONPATH=/opt/airflow \
-    LOG_LEVEL=INFO
+    LOG_LEVEL=INFO \
+    CREDIT_RISK_GO_BIN=/opt/airflow/bin \
+    CREDIT_RISK_DATA_DIR=/opt/airflow/data \
+    PYTHON_BIN=python
 
 COPY requirements/base.txt requirements/pipeline.txt /tmp/requirements/
 RUN pip install --no-cache-dir -r /tmp/requirements/pipeline.txt
 
 COPY --chown=airflow:0 dags/ /opt/airflow/dags/
-COPY --chown=airflow:0 agents/ /opt/airflow/agents/
-COPY --chown=airflow:0 api/ /opt/airflow/api/
 COPY --chown=airflow:0 pipeline/ /opt/airflow/pipeline/
+COPY --from=gobuild --chown=airflow:0 /out/ /opt/airflow/bin/

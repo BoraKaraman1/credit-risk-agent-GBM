@@ -1,31 +1,31 @@
-FROM python:3.11-slim
+FROM golang:1.26 AS build
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    CREDIT_RISK_MODELS_DIR=/models \
-    LOG_LEVEL=INFO \
+WORKDIR /src
+
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -o /out/scoring-api ./cmd/scoring-api
+
+FROM debian:bookworm-slim
+
+ENV CREDIT_RISK_MODELS_DIR=/models \
     PORT=8000
 
-WORKDIR /app
-
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --gid app --create-home app
 
-COPY requirements/ ./requirements/
-RUN pip install --upgrade pip \
-    && pip install -r requirements/api.txt
-
-COPY api/ ./api/
+COPY --from=build /out/scoring-api /usr/local/bin/scoring-api
 
 USER app
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
-CMD ["sh", "-c", "uvicorn api.scoring_service:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["scoring-api"]

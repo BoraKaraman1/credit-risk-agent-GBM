@@ -3,12 +3,26 @@ Airflow DAG: Credit Risk Monitoring
 Weekly monitoring: drift check + performance check → conditional retrain.
 Drift and performance monitors run in parallel, then a branching decision
 determines whether to trigger the retrain orchestrator.
+
+The monitors are Go binaries (see go/cmd/) that print a JSON report to
+stdout; this DAG shells out to them and routes the reports via XCom.
 """
 
+import json
+import logging
+import os
+import subprocess
 from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
+
+logger = logging.getLogger(__name__)
+
+# Go binaries live in /opt/airflow/bin inside the Docker image; for a
+# local Airflow run from the repo root they are in go/bin.
+GO_BIN_DIR = os.environ.get("CREDIT_RISK_GO_BIN", "/opt/airflow/bin")
 
 default_args = {
     "owner": "credit_risk",
@@ -19,16 +33,23 @@ default_args = {
 }
 
 
+def _run_go(binary, *args):
+    """Run a Go agent and return its parsed JSON report."""
+    cmd = [os.path.join(GO_BIN_DIR, binary), *args]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    if result.stderr:
+        logger.info("%s stderr:\n%s", binary, result.stderr)
+    return json.loads(result.stdout)
+
+
 def _run_drift_monitor(**kwargs):
-    from agents.drift_monitor import run
-    report = run()
+    report = _run_go("drift-monitor")
     kwargs["ti"].xcom_push(key="drift_report", value=report)
     return report
 
 
 def _run_performance_monitor(**kwargs):
-    from agents.performance_monitor import run
-    report = run()
+    report = _run_go("performance-monitor")
     kwargs["ti"].xcom_push(key="perf_report", value=report)
     return report
 
@@ -58,9 +79,8 @@ def _decide_retrain(**kwargs):
 
 
 def _run_retrain(**kwargs):
-    from agents.retrain_orchestrator import run
     reason = kwargs["ti"].xcom_pull(task_ids="decide_retrain", key="retrain_reason") or "monitoring_trigger"
-    report = run(reason=reason)
+    report = _run_go("retrain-orchestrator", reason)
     return report
 
 

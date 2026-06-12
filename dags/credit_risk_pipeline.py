@@ -1,13 +1,24 @@
 """
 Airflow DAG: Credit Risk Pipeline
-Monthly full pipeline run: Bronze → Silver → Gold → Train → Sync to Supabase.
+Monthly full pipeline run: Bronze → Silver → Gold → Train → Export → Sync.
 Optional branch: Reject Inference after training (enabled via DAG config).
+
+Training stays in Python; after training, the champion is exported to
+model.json so the Go services (scoring API, monitors, sync) can load it,
+then the Go supabase-sync binary pushes features to the feature store.
 """
 
+import os
+import subprocess
 from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
+
+# Go binaries live in /opt/airflow/bin inside the Docker image; for a
+# local Airflow run from the repo root they are in go/bin.
+GO_BIN_DIR = os.environ.get("CREDIT_RISK_GO_BIN", "/opt/airflow/bin")
 
 default_args = {
     "owner": "credit_risk",
@@ -38,9 +49,13 @@ def _run_train():
     run()
 
 
+def _run_export_model():
+    from pipeline.export_model_json import MODELS_DIR, export_model
+    export_model(MODELS_DIR / "champion")
+
+
 def _run_sync():
-    from pipeline.sync_to_supabase import run
-    run()
+    subprocess.run([os.path.join(GO_BIN_DIR, "supabase-sync")], check=True)
 
 
 def _run_reject_inference():
@@ -78,6 +93,7 @@ with DAG(
     silver = PythonOperator(task_id="silver_transform", python_callable=_run_silver)
     gold = PythonOperator(task_id="gold_features", python_callable=_run_gold)
     train = PythonOperator(task_id="train_model", python_callable=_run_train)
+    export = PythonOperator(task_id="export_model_json", python_callable=_run_export_model)
     sync = PythonOperator(task_id="sync_to_supabase", python_callable=_run_sync)
     fairness = PythonOperator(task_id="fairness_analysis", python_callable=_run_fairness)
 
@@ -88,8 +104,8 @@ with DAG(
     reject_inf = PythonOperator(task_id="reject_inference", python_callable=_run_reject_inference)
     skip_ri = EmptyOperator(task_id="skip_reject_inference")
 
-    # Linear pipeline: Bronze → Silver → Gold → Train → Sync + Fairness
-    bronze >> silver >> gold >> train >> sync
+    # Linear pipeline: Bronze → Silver → Gold → Train → Export → Sync + Fairness
+    bronze >> silver >> gold >> train >> export >> sync
     train >> fairness
 
     # Optional reject inference branch after train

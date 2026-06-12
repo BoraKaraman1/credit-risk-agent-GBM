@@ -1,4 +1,2 @@
--r api.txt
 -r pipeline.txt
 pytest>=8.0
-httpx>=0.24
