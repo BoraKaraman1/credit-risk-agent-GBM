@@ -13,8 +13,6 @@ COPY requirements/ ./requirements/
 RUN pip install --upgrade pip \
     && pip install -r requirements/test.txt
 
-COPY agents/ ./agents/
-COPY api/ ./api/
 COPY pipeline/ ./pipeline/
 COPY tests/ ./tests/
 

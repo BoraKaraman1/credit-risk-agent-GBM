@@ -39,17 +39,5 @@ services:
       start_period: 45s
       retries: 3
 
-  audit-tests:
-    profiles: ["test"]
-    build:
-      context: .
-      dockerfile: Dockerfile.test
-    environment:
-      TEST_DATABASE_URL: postgresql://credit_risk:credit_risk@postgres:5432/credit_risk
-    command: ["python", "-m", "pytest", "tests/test_audit_logging_sql.py", "-q"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-
 volumes:
   postgres_data:

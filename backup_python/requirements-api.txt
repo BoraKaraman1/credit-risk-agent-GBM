@@ -1,0 +1,14 @@
+# Dependencies of the superseded Python scoring API (backup_python/api).
+# Self-contained: the live requirements/base.txt no longer carries the
+# DB/SHAP dependencies, which now belong to the Go serving layer.
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+joblib>=1.3
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+fastapi>=0.100
+uvicorn[standard]>=0.20
+pydantic>=2.0
+shap>=0.45

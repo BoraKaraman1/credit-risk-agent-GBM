@@ -19,7 +19,6 @@ from pipeline.reject_inference import (
     REJECT_SAMPLE_WEIGHT,
 )
 from pipeline.train import compute_gini
-from agents.drift_monitor import compute_psi, compute_csi
 
 
 # --- Helpers ---
@@ -71,53 +70,8 @@ class TestComputeGini:
         assert compute_gini(1.0) == pytest.approx(1.0)
 
 
-# --- PSI / CSI tests ---
-
-class TestComputePSI:
-    def test_identical_distributions(self):
-        scores = np.random.RandomState(42).rand(1000)
-        psi, _, _ = compute_psi(scores, scores)
-        assert psi == pytest.approx(0.0, abs=0.001)
-
-    def test_shifted_distribution(self):
-        rng = np.random.RandomState(42)
-        expected = rng.beta(2, 5, 5000)
-        actual = rng.beta(5, 2, 5000)
-        psi, _, _ = compute_psi(expected, actual)
-        assert psi > 0.1  # should detect significant shift
-
-    def test_returns_tuple(self):
-        scores = np.random.RandomState(42).rand(100)
-        result = compute_psi(scores, scores)
-        assert len(result) == 3
-
-    def test_bin_percentages_sum_to_one(self):
-        rng = np.random.RandomState(42)
-        _, exp_pct, act_pct = compute_psi(rng.rand(500), rng.rand(500))
-        assert sum(exp_pct) == pytest.approx(1.0, abs=0.01)
-        assert sum(act_pct) == pytest.approx(1.0, abs=0.01)
-
-
-class TestComputeCSI:
-    def test_identical_features(self):
-        col = np.random.RandomState(42).randn(1000)
-        csi = compute_csi(col, col)
-        assert csi == pytest.approx(0.0, abs=0.01)
-
-    def test_shifted_feature(self):
-        rng = np.random.RandomState(42)
-        train_col = rng.normal(0, 1, 5000)
-        prod_col = rng.normal(2, 1, 5000)  # mean shifted by 2 std
-        csi = compute_csi(train_col, prod_col)
-        assert csi > 0.1
-
-    def test_handles_nans(self):
-        rng = np.random.RandomState(42)
-        col = rng.randn(100)
-        col_with_nan = col.copy()
-        col_with_nan[:10] = np.nan
-        csi = compute_csi(col, col_with_nan)
-        assert np.isfinite(csi)
+# PSI / CSI drift metrics moved to the Go services; their tests live in
+# go/internal/metrics (cross-checked against numpy reference fixtures).
 
 
 # --- Reject inference tests ---
