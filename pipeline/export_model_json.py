@@ -1,7 +1,7 @@
 """
 Model Export for Go Runtime
 Dumps a trained LightGBM binary classifier to the portable JSON format
-(tree nodes + baseline + metadata) that go/internal/model loads. The
+(tree nodes + baseline + metadata) that go/shared/model loads. The
 nested LightGBM tree dump is flattened into columnar node arrays with
 sklearn-style semantics (value <= threshold goes left, NaN follows
 missing_go_to_left), so the Go runtime is model-library agnostic.
@@ -17,6 +17,10 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline.calibrate import scorecard_params
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +136,18 @@ def export_model(model_dir):
         "baseline_prediction": baseline,
         "trees": trees,
     }
+
+    # Optional isotonic calibrator (pipeline/calibrate.py): exported as
+    # breakpoints so the Go runtime interpolates without sklearn.
+    calibrator_path = model_dir / "calibrator.joblib"
+    if calibrator_path.exists():
+        iso = joblib.load(calibrator_path)
+        payload["calibration"] = {
+            "method": "isotonic",
+            "x": iso.X_thresholds_.tolist(),
+            "y": iso.y_thresholds_.tolist(),
+        }
+        payload["scorecard"] = scorecard_params()
 
     out_path = model_dir / "model.json"
     with open(out_path, "w") as f:

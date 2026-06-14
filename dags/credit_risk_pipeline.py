@@ -5,7 +5,7 @@ Optional branch: Reject Inference after training (enabled via DAG config).
 
 Training stays in Python; after training, the champion is exported to
 model.json so the Go services (scoring API, monitors, sync) can load it,
-then the Go supabase-sync binary pushes features to the feature store.
+then the gbm sync command pushes features to the feature store.
 """
 
 import os
@@ -55,7 +55,7 @@ def _run_export_model():
 
 
 def _run_sync():
-    subprocess.run([os.path.join(GO_BIN_DIR, "supabase-sync")], check=True)
+    subprocess.run([os.path.join(GO_BIN_DIR, "gbm"), "sync"], check=True)
 
 
 def _run_reject_inference():

@@ -6,7 +6,7 @@ COPY go/go.mod go/go.sum ./
 RUN go mod download
 
 COPY go/ ./
-RUN CGO_ENABLED=0 go build -o /out/scoring-api ./cmd/scoring-api
+RUN CGO_ENABLED=0 go build -o /out/gbm .
 
 FROM debian:bookworm-slim
 
@@ -19,7 +19,7 @@ RUN apt-get update \
     && groupadd --system app \
     && useradd --system --gid app --create-home app
 
-COPY --from=build /out/scoring-api /usr/local/bin/scoring-api
+COPY --from=build /out/gbm /usr/local/bin/gbm
 
 USER app
 
@@ -28,4 +28,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
-CMD ["scoring-api"]
+CMD ["gbm", "serve"]

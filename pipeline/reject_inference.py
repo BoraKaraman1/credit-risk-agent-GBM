@@ -222,6 +222,11 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
 
     joblib.dump(model, dest / "model.joblib")
 
+    # Remove any stale calibrator from a previous challenger: this path
+    # does not fit one, and the JSON exporter would otherwise embed a
+    # calibrator fit on a different model.
+    (dest / "calibrator.joblib").unlink(missing_ok=True)
+
     # Determine version
     champion_meta_path = MODELS_DIR / "champion" / "model_metadata.json"
     if champion_meta_path.exists():

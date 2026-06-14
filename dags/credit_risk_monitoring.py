@@ -1,10 +1,12 @@
 """
 Airflow DAG: Credit Risk Monitoring
-Weekly monitoring: drift check + performance check → conditional retrain.
-Drift and performance monitors run in parallel, then a branching decision
-determines whether to trigger the retrain orchestrator.
+Weekly monitoring: outcome backfill + drift check + performance check →
+conditional retrain. The backfill matures scored outcomes first so the
+performance monitor reads real labels; drift runs in parallel (it uses
+scores, not outcomes). A branching decision then determines whether to
+trigger the retrain orchestrator.
 
-The monitors are Go binaries (see go/cmd/) that print a JSON report to
+The monitors are gbm subcommands (see go/) that print a JSON report to
 stdout; this DAG shells out to them and routes the reports via XCom.
 """
 
@@ -33,23 +35,35 @@ default_args = {
 }
 
 
-def _run_go(binary, *args):
-    """Run a Go agent and return its parsed JSON report."""
-    cmd = [os.path.join(GO_BIN_DIR, binary), *args]
+def _run_go(subcommand, *args):
+    """Run a gbm subcommand and return its parsed JSON report."""
+    cmd = [os.path.join(GO_BIN_DIR, "gbm"), subcommand, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     if result.stderr:
-        logger.info("%s stderr:\n%s", binary, result.stderr)
+        logger.info("%s stderr:\n%s", subcommand, result.stderr)
     return json.loads(result.stdout)
 
 
+def _run_outcome_backfill(**kwargs):
+    """Mature scored outcomes before the performance monitor reads them.
+    Tolerant of a missing database so monitoring still proceeds."""
+    try:
+        report = _run_go("backfill")
+        logger.info("outcome backfill: %s", report)
+        return report
+    except (subprocess.CalledProcessError, ValueError) as e:
+        logger.warning("outcome backfill skipped: %s", e)
+        return None
+
+
 def _run_drift_monitor(**kwargs):
-    report = _run_go("drift-monitor")
+    report = _run_go("drift")
     kwargs["ti"].xcom_push(key="drift_report", value=report)
     return report
 
 
 def _run_performance_monitor(**kwargs):
-    report = _run_go("performance-monitor")
+    report = _run_go("performance")
     kwargs["ti"].xcom_push(key="perf_report", value=report)
     return report
 
@@ -80,7 +94,7 @@ def _decide_retrain(**kwargs):
 
 def _run_retrain(**kwargs):
     reason = kwargs["ti"].xcom_pull(task_ids="decide_retrain", key="retrain_reason") or "monitoring_trigger"
-    report = _run_go("retrain-orchestrator", reason)
+    report = _run_go("retrain", reason)
     return report
 
 
@@ -94,11 +108,15 @@ with DAG(
     tags=["credit_risk", "monitoring"],
 ) as dag:
 
+    backfill = PythonOperator(task_id="outcome_backfill", python_callable=_run_outcome_backfill)
     drift = PythonOperator(task_id="drift_monitor", python_callable=_run_drift_monitor)
     perf = PythonOperator(task_id="performance_monitor", python_callable=_run_performance_monitor)
     decide = BranchPythonOperator(task_id="decide_retrain", python_callable=_decide_retrain)
     retrain = PythonOperator(task_id="retrain", python_callable=_run_retrain)
     skip = EmptyOperator(task_id="skip_retrain")
 
-    # Drift and performance run in parallel, then decide whether to retrain
+    # Backfill matures outcomes before the performance monitor reads them;
+    # drift runs in parallel (it uses scores, not outcomes). Then decide
+    # whether to retrain.
+    backfill >> perf
     [drift, perf] >> decide >> [retrain, skip]

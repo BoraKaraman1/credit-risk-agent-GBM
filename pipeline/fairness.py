@@ -252,6 +252,43 @@ def run(model=None, X_test=None, y_test=None) -> dict:
     return report
 
 
+def summarize(report: dict) -> dict:
+    """Compact fairness summary for the model card and the promotion gate.
+
+    Keeps only what downstream consumers need: per attribute, the
+    privileged group, each group's DIR plus approval and default rates,
+    and the list of groups in violation.
+    """
+    attrs = {}
+    for attr_name, ar in report["attributes"].items():
+        approval = {m["group"]: m["approval_rate"] for m in ar["group_metrics"]}
+        default = {m["group"]: m["default_rate"] for m in ar["group_metrics"]}
+        groups = {}
+        for group, dir_val in ar["disparate_impact"]["ratios"].items():
+            groups[group] = {
+                "dir": dir_val,
+                "approval_rate": approval.get(group),
+                "default_rate": default.get(group),
+            }
+        attrs[attr_name] = {
+            "description": ar["description"],
+            "privileged_group": ar["privileged_group"],
+            "groups": groups,
+            "violations": ar["disparate_impact"]["violations"],
+        }
+    return {"dir_threshold": report["dir_threshold"], "attributes": attrs}
+
+
+def save_fairness(model_dir, summary: dict) -> None:
+    """Record the fairness summary in the model's model_metadata.json."""
+    meta_path = Path(model_dir) / "model_metadata.json"
+    with open(meta_path) as f:
+        meta = json.load(f)
+    meta["fairness"] = summary
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+
 def format_report(report: dict) -> str:
     """Format the report dict as a human-readable summary."""
     lines = [

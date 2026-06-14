@@ -16,6 +16,7 @@ from pipeline.fairness import (
     analyze_attribute,
     run as run_fairness,
     format_report,
+    summarize,
     DIR_THRESHOLD,
 )
 
@@ -229,3 +230,24 @@ class TestFairnessRun:
         assert isinstance(formatted, str)
         assert "FAIRNESS ANALYSIS REPORT" in formatted
         assert "Disparate Impact" in formatted
+
+
+class TestSummarize:
+    def test_summary_shape_and_dir_values(self):
+        X, y, _ = _make_fairness_data()
+        model = _train_dummy_model(X, y)
+        report = run_fairness(model=model, X_test=X, y_test=y)
+        summary = summarize(report)
+
+        assert summary["dir_threshold"] == DIR_THRESHOLD
+        assert set(summary["attributes"]) == set(report["attributes"])
+        for attr, a in summary["attributes"].items():
+            assert "privileged_group" in a
+            assert "violations" in a
+            # Every group carries a DIR plus approval and default rates
+            for group, g in a["groups"].items():
+                assert "dir" in g and "approval_rate" in g and "default_rate" in g
+            # DIR values match the underlying report
+            ratios = report["attributes"][attr]["disparate_impact"]["ratios"]
+            for group, dir_val in ratios.items():
+                assert a["groups"][group]["dir"] == dir_val

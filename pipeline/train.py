@@ -6,6 +6,7 @@ Uses LightGBM (industry-standard GBM; requires OpenMP — `brew install libomp` 
 
 import json
 import logging
+import sys
 import joblib
 import pandas as pd
 import numpy as np
@@ -16,6 +17,10 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime, timezone
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import calibrate, fairness, model_card
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,19 @@ def load_gold_data():
     return X_train, y_train, X_val, y_val, X_test, y_test, feature_cols
 
 
+def early_stopping_split(X_train, y_train, X_val, y_val):
+    """Deterministic stratified carve-out from train+val. The carve-out
+    is used for early stopping during training and reused afterwards to
+    fit the probability calibrator (it never sees gradient fitting)."""
+    combined_X = pd.concat([X_train, X_val], ignore_index=True)
+    combined_y = pd.concat([y_train, y_val], ignore_index=True)
+    val_fraction = len(X_val) / len(combined_X)
+    return train_test_split(
+        combined_X, combined_y, test_size=val_fraction,
+        random_state=42, stratify=combined_y,
+    )
+
+
 def train_model(X_train, y_train, X_val, y_val, params=None):
     """Train LightGBM on train+val with a random stratified carve-out for
     early stopping (same data usage as the previous champion: with a
@@ -79,13 +97,7 @@ def train_model(X_train, y_train, X_val, y_val, params=None):
             "verbose": -1,
         }
 
-    combined_X = pd.concat([X_train, X_val], ignore_index=True)
-    combined_y = pd.concat([y_train, y_val], ignore_index=True)
-    val_fraction = len(X_val) / len(combined_X)
-    X_fit, X_es, y_fit, y_es = train_test_split(
-        combined_X, combined_y, test_size=val_fraction,
-        random_state=42, stratify=combined_y,
-    )
+    X_fit, X_es, y_fit, y_es = early_stopping_split(X_train, y_train, X_val, y_val)
 
     model = lgb.LGBMClassifier(**params)
     model.fit(
@@ -112,7 +124,7 @@ def evaluate_model(model, X, y, split_name="test"):
     return {"auc": round(auc, 4), "ks": round(ks, 4), "gini": round(gini, 4)}
 
 
-def save_model(model, feature_cols, metrics, version, dest_dir):
+def save_model(model, feature_cols, metrics, version, dest_dir, params=None):
     """Save model and metadata JSON."""
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -126,6 +138,8 @@ def save_model(model, feature_cols, metrics, version, dest_dir):
         "n_features": len(feature_cols),
         "metrics": metrics,
     }
+    if params is not None:
+        meta["hyperparameters"] = params
     with open(dest_dir / "model_metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -186,9 +200,27 @@ def run(as_challenger=False):
             "val": val_metrics,
             "test": test_metrics,
         }
-        save_model(model, feature_cols, all_metrics, version, dest)
+        save_model(model, feature_cols, all_metrics, version, dest, params=params)
         mlflow.log_param("model_version", version)
         mlflow.log_param("role", "challenger" if as_challenger else "champion")
+
+        # Calibrate on the early-stopping carve-out (never gradient-fitted)
+        logger.info("Fitting isotonic calibrator ...")
+        _, X_es, _, y_es = early_stopping_split(X_train, y_train, X_val, y_val)
+        calibrator, cal_report = calibrate.calibrate_model(model, X_es, y_es, X_test, y_test)
+        calibrate.save_calibration(dest, calibrator, cal_report)
+        mlflow.log_metric("test_brier_raw", cal_report["brier_raw"])
+        mlflow.log_metric("test_brier_calibrated", cal_report["brier_calibrated"])
+
+        # Fairness summary in metadata (feeds the model card and gate)
+        logger.info("Running fairness analysis ...")
+        fair_summary = fairness.summarize(
+            fairness.run(model=model, X_test=X_test, y_test=y_test))
+        fairness.save_fairness(dest, fair_summary)
+
+    # Validation report (champion only): a markdown model card for MRM.
+    if not as_challenger:
+        model_card.generate(dest)
 
     logger.info(f"Done. Model {version} saved as {'challenger' if as_challenger else 'champion'}.")
     return model, all_metrics

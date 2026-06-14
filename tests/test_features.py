@@ -69,7 +69,7 @@ class TestComputeGini:
 
 
 # PSI / CSI drift metrics moved to the Go services; their tests live in
-# go/internal/metrics (cross-checked against numpy reference fixtures).
+# go/shared/metrics (cross-checked against numpy reference fixtures).
 
 
 # --- Reject inference tests ---

@@ -43,7 +43,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 | Database | Supabase PostgreSQL (free tier) |
 | Model | LightGBM binary classifier (training) |
 | Serving | Go 1.26, pure-Go GBM inference from a JSON model export |
-| API | Go `net/http` (`go/cmd/scoring-api`) |
+| API | Go `net/http` (`gbm serve`, `go/inference`) |
 | Orchestration | Apache Airflow |
 | Data quality | Great Expectations |
 | Experiment tracking | MLflow (local) |
@@ -66,17 +66,14 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 │   ├── data_quality.py           # Great Expectations validation suites
 │   └── supabase_schema.sql       # Database DDL
 ├── go/                           # Serving layer (see go/README.md)
-│   ├── cmd/
-│   │   ├── scoring-api/          # /score, /score/batch, /health, /reload
-│   │   ├── drift-monitor/        # PSI/CSI drift detection
-│   │   ├── performance-monitor/  # AUC/KS degradation tracking
-│   │   ├── retrain-orchestrator/ # Champion vs challenger retraining flow
-│   │   └── supabase-sync/        # Gold → Supabase feature store
-│   └── internal/
+│   ├── main.go                   # single `gbm` binary; dispatches subcommands
+│   ├── inference/                # gbm serve — /score, /score/batch, /health, /reload, /metrics
+│   ├── monitoring/               # gbm drift|performance|backfill|retrain|sync
+│   ├── db/                       # pgx Supabase access + JSONB audit inserts
+│   └── shared/
 │       ├── model/                # GBM inference + TreeSHAP (verified vs sklearn/shap)
 │       ├── metrics/              # PSI, CSI, AUC, KS, decile analysis
 │       ├── gold/                 # Gold parquet reader
-│       ├── db/                   # pgx Supabase access + JSONB audit inserts
 │       └── config/               # Shared thresholds and paths
 ├── backup_python/                # Superseded Python services (reference only)
 ├── dags/
@@ -124,8 +121,8 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Build the Go serving binaries
-cd go && go build -o bin/ ./cmd/... && cd ..
+# Build the Go serving binary
+cd go && go build -o bin/gbm . && cd ..
 ```
 
 `requirements.txt` installs the full development environment. For narrower installs, use:
@@ -184,7 +181,7 @@ python pipeline/train.py
 python pipeline/export_model_json.py
 
 # 6. Sync features to Supabase (Go)
-./go/bin/supabase-sync
+./go/bin/gbm sync
 
 # 7. (Optional) Run reject inference
 python pipeline/reject_inference.py
@@ -196,23 +193,28 @@ The API is a single Go binary that loads the exported champion (`data/models/cha
 
 ```bash
 # Start the API
-PORT=8000 ./go/bin/scoring-api
+PORT=8000 ./go/bin/gbm serve
 
-# Score an applicant
+# Score an applicant (X-API-Key only needed when API_KEYS is set)
 curl -X POST http://localhost:8000/score \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
   -d '{"applicant_id": "LC_0000001"}'
 
 # Batch scoring
 curl -X POST http://localhost:8000/score/batch \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
   -d '{"applicant_ids": ["LC_0000001", "LC_0000002"]}'
 
-# Health check
+# Health check (open)
 curl http://localhost:8000/health
 
+# Prometheus metrics (open)
+curl http://localhost:8000/metrics
+
 # Hot-reload model (after re-running pipeline/export_model_json.py)
-curl -X POST http://localhost:8000/reload
+curl -X POST http://localhost:8000/reload -H "X-API-Key: your-key"
 ```
 
 **Decision rules:**
@@ -222,10 +224,23 @@ curl -X POST http://localhost:8000/reload
 | 0.15 <= PD < 0.30 | Manual Review |
 | PD >= 0.30 | Decline |
 
+### Calibration and Scorecard Scaling
+
+Raw GBM scores rank-order well but are not calibrated PDs, and everything downstream of a PD (pricing, provisioning, IFRS 9 / CECL) assumes calibration. The training pipeline fits an isotonic calibrator on the early-stopping holdout (never gradient-fitted), reports Brier score and reliability curves on the test split, and exports the calibrator inside `model.json` as breakpoints the Go runtime interpolates without any Python dependency.
+
+Each response carries three numbers:
+
+- `score`: the raw model probability (logged and monitored, unchanged semantics)
+- `pd`: the calibrated probability of default
+- `scaled_score`: an industry-style scorecard score from points-to-double-odds scaling, anchored at 600 = 30:1 good:bad odds with 20 points to double the odds
+
+Go calibration and scaling match the sklearn calibrator to 1e-9 on the parity fixtures.
+
 ### Adverse Action Reasons (ECOA)
 
 For decline and manual-review decisions, the API returns the top 4 SHAP-based adverse action reasons, as required by ECOA (Regulation B). Each reason includes:
 
+- A standardized ECOA / Regulation B principal reason statement and a stable `code`. Several features can map to one reason, since the notice discloses the reason, not the internal feature.
 - Human-readable feature name (e.g., "Debt-to-Income Ratio")
 - SHAP contribution value (how much the feature pushed the score toward default)
 - The applicant's actual value for that feature
@@ -235,10 +250,14 @@ Example response (truncated):
 ```json
 {
   "applicant_id": "LC_0000001",
-  "pd_score": 0.42,
+  "score": 0.42,
+  "pd": 0.40562,
+  "scaled_score": 512,
   "decision": "decline",
   "adverse_actions": [
     {
+      "code": 2,
+      "reason": "Excessive obligations in relation to income",
       "feature_name": "Debt-to-Income Ratio",
       "shap_value": 0.087,
       "feature_value": 38.2,
@@ -248,24 +267,42 @@ Example response (truncated):
 }
 ```
 
+### Authentication and Rate Limiting
+
+`/score`, `/score/batch`, and `/reload` sit behind two middlewares; `/health` and `/metrics` stay open.
+
+- **API keys**: set `API_KEYS` to a comma-separated list. Callers send one in the `X-API-Key` header, compared in constant time. When `API_KEYS` is unset the API is open and logs a warning at startup, so local development and the existing tests keep working unchanged.
+- **Rate limiting**: a per-client token bucket (`golang.org/x/time/rate`), keyed by API key when authenticated and by client IP otherwise. Defaults are 20 req/s sustained with a burst of 40, tunable via `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST`. Over-budget requests get `429` with a `Retry-After` header.
+
+Every request gets an `X-Request-ID` (generated, or the incoming one echoed back) that ties together the structured access logs.
+
+### Server Lifecycle
+
+The API runs on an `http.Server` with read, write, and idle timeouts instead of the bare `http.ListenAndServe`. On `SIGINT`/`SIGTERM` it stops accepting connections and drains in-flight requests for up to 30 seconds before exiting, so a deploy or `docker compose down` does not cut off a scoring request mid-flight.
+
 ### Audit Logging
 
 Each scoring request writes an audit row to `scoring_log` with the feature snapshot stored as JSONB. Monitoring agents write PSI/AUC summaries to `drift_log`, also with JSONB details. The Go services use pgx parameterized inserts with explicit `::jsonb` casts so Postgres receives valid JSONB values.
 
 ## Monitoring Agents
 
-The agents are Go binaries that print a JSON report to stdout and log results to `drift_log`. When `DATABASE_URL` is unset or `scoring_log` is empty, they fall back to the Gold test set as a production proxy.
+These are `gbm` subcommands that print a JSON report to stdout and log results to `drift_log`. When `DATABASE_URL` is unset or `scoring_log` is empty, they fall back to the Gold test set as a production proxy.
 
 ```bash
 # Drift monitor — PSI on score distribution, CSI on features
-./go/bin/drift-monitor
+./go/bin/gbm drift
 
 # Performance monitor — AUC/KS tracking vs training baseline
-./go/bin/performance-monitor
+./go/bin/gbm performance
+
+# Outcome backfill — mature scoring_log outcomes from Gold test labels
+./go/bin/gbm backfill
 
 # Retrain orchestrator — train challenger (via Python), compare, recommend
-./go/bin/retrain-orchestrator manual
+./go/bin/gbm retrain manual
 ```
+
+The outcome backfill closes the monitoring loop. The scoring API cannot know an applicant's real outcome at decision time, so `scoring_log.actual_default` starts NULL and the performance monitor falls back to the test-set proxy. This job simulates outcomes arriving: for applicants scored at least `OUTCOME_BACKFILL_DELAY_DAYS` ago, it writes back the true label from the Gold test set. Once enough outcomes accumulate, the performance monitor runs on production data.
 
 **Thresholds:**
 | Metric | Warning | Action |
@@ -273,6 +310,16 @@ The agents are Go binaries that print a JSON report to stdout and log results to
 | Score PSI | > 0.10 | > 0.25 → retrain |
 | Feature CSI | — | > 0.20 → investigate |
 | AUC drop | — | > 0.03 → retrain |
+
+### Prometheus + Grafana
+
+The API exposes Prometheus metrics at `/metrics`: request counts and latency histograms per endpoint, the predicted-PD distribution, decision counts (approve/review/decline), and the loaded model version as a labeled info gauge. A compose profile brings up Prometheus and a pre-provisioned Grafana dashboard:
+
+```bash
+docker compose --profile monitoring up
+```
+
+Grafana is at `http://localhost:3000` (anonymous viewer access enabled), Prometheus at `http://localhost:9090`. The default `docker compose up` is unchanged: it runs only Postgres and the API.
 
 ## Airflow Orchestration
 
@@ -330,6 +377,19 @@ python -m pipeline.fairness
 ```
 
 Produces per-group breakdowns with AUC, default rate, approval rate, and mean PD score.
+
+### Fairness Gate in Promotion
+
+The retrain orchestrator will not recommend PROMOTE on accuracy alone. It computes fairness for both the challenger and the current champion on the test set and blocks promotion when the challenger introduces a new DIR violation or worsens one the champion already had (champion-relative, since this dataset already carries inherent disparity on the proxies). A more discriminatory model is held back even if its AUC is higher (SR 11-7 + ECOA). The comparison is champion-relative rather than an absolute 0.80 cutoff, because an absolute cutoff would make every challenger unpromotable here.
+
+## Model Card
+
+Each champion training run regenerates a markdown validation report at [`docs/model_card.md`](docs/model_card.md): version and data window, discrimination metrics, calibration (Brier and reliability), scorecard parameters, the full fairness breakdown, hyperparameters, and an overall validation status. This is the artifact a model risk management team reviews.
+
+```bash
+# Regenerate from an existing model without retraining
+python pipeline/model_card.py data/models/champion docs/model_card.md
+```
 
 ## Data Quality Validation
 
