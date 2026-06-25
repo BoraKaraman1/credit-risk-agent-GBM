@@ -10,17 +10,22 @@ attributes. No external fairness library required — metrics computed directly.
 
 import json
 import logging
+import sys
 import joblib
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from sklearn.metrics import roc_auc_score
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import config
+
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-GOLD_DIR = DATA_DIR / "gold"
-MODELS_DIR = DATA_DIR / "models"
+DATA_DIR = config.data_dir()
+GOLD_DIR = config.gold_dir()
+MODELS_DIR = config.models_dir()
 
 # Decision thresholds (mirrored from API)
 APPROVE_THRESHOLD = 0.15
@@ -61,6 +66,20 @@ def _model_path(directory):
     if p.exists():
         return p
     return directory / "model.pkl"
+
+
+def _reverse_maps_from_metadata(encodings: dict) -> dict:
+    """Invert the persisted {category: code} maps to {code: category} for
+    the protected categorical attributes, so fairness labels follow the
+    same encoding the Gold layer wrote rather than a duplicated hardcoded
+    assumption. Attributes without persisted encodings (e.g. binary flags)
+    keep their hardcoded reverse map."""
+    overrides = {}
+    for attr in ("home_ownership", "verification_status"):
+        mapping = encodings.get(attr)
+        if mapping:
+            overrides[attr] = {int(code): cat for cat, code in mapping.items()}
+    return overrides
 
 
 def compute_disparate_impact(approval_rates: dict, privileged_group: str) -> dict:
@@ -195,18 +214,26 @@ def analyze_attribute(y_true: np.ndarray, y_score: np.ndarray,
     }
 
 
-def run(model=None, X_test=None, y_test=None) -> dict:
+def run(model=None, X_test=None, y_test=None, calibrator=None) -> dict:
     """
     Run fairness analysis across all protected attributes.
-    If model/X_test/y_test not provided, loads from disk.
+    If model/X_test/y_test not provided, loads from disk (including the
+    champion's calibrator when present).
     """
+    reverse_overrides = {}
     if model is None or X_test is None or y_test is None:
         with open(GOLD_DIR / "feature_metadata.json") as f:
             meta = json.load(f)
         feature_cols = meta["feature_columns"]
+        reverse_overrides = _reverse_maps_from_metadata(meta.get("categorical_encodings", {}))
 
         model_path = _model_path(MODELS_DIR / "champion")
         model = joblib.load(model_path)
+
+        if calibrator is None:
+            cal_path = MODELS_DIR / "champion" / "calibrator.joblib"
+            if cal_path.exists():
+                calibrator = joblib.load(cal_path)
 
         test = pd.read_parquet(GOLD_DIR / "features_test.parquet")
         X_test = test[feature_cols]
@@ -214,7 +241,11 @@ def run(model=None, X_test=None, y_test=None) -> dict:
     else:
         feature_cols = list(X_test.columns) if hasattr(X_test, "columns") else None
 
-    y_score = model.predict_proba(X_test)[:, 1]
+    # Decisions use the calibrated PD to match the serving API (the
+    # 0.15/0.30 thresholds are probabilities of default). Calibration is
+    # monotonic, so discrimination metrics (AUC) are unchanged.
+    raw_score = model.predict_proba(X_test)[:, 1]
+    y_score = calibrator.predict(raw_score) if calibrator is not None else raw_score
     y_true = np.asarray(y_test)
 
     if isinstance(X_test, pd.DataFrame):
@@ -230,9 +261,15 @@ def run(model=None, X_test=None, y_test=None) -> dict:
             logger.warning(f"Attribute {attr_name} not found in features, skipping")
             continue
 
+        # Prefer the reverse map persisted in feature metadata; fall back
+        # to the hardcoded one when no encoding was persisted.
+        cfg = attr_config
+        if attr_name in reverse_overrides:
+            cfg = {**attr_config, "reverse_map": reverse_overrides[attr_name]}
+
         attr_values = X_values[attr_name].values.astype(int)
         results[attr_name] = analyze_attribute(
-            y_true, y_score, attr_values, attr_config, attr_name
+            y_true, y_score, attr_values, cfg, attr_name
         )
 
         if results[attr_name]["has_dir_violation"]:

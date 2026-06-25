@@ -21,10 +21,14 @@ import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import config
+
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-MODELS_DIR = DATA_DIR / "models"
+DATA_DIR = config.data_dir()
+MODELS_DIR = config.models_dir()
 
 # Scorecard anchors: a score of 600 corresponds to 30:1 good:bad odds,
 # and every 20 points doubles the odds (PDO).

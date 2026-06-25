@@ -5,14 +5,19 @@ Bronze is immutable — data lands exactly as received, never mutated.
 """
 
 import logging
+import sys
 import pandas as pd
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import config
+
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-BRONZE_DIR = DATA_DIR / "bronze"
+DATA_DIR = config.data_dir()
+BRONZE_DIR = config.bronze_dir()
 
 
 def ingest_accepted():
@@ -42,7 +47,7 @@ def ingest_accepted():
         from pipeline.data_quality import validate_bronze
         result = validate_bronze(df, source_name="accepted")
         if not result["success"]:
-            logger.warning(f"Bronze validation failed: {result}")
+            config.enforce_data_quality("Bronze (accepted)", str(result))
     except ImportError:
         pass
 
@@ -71,7 +76,7 @@ def ingest_rejected():
         from pipeline.data_quality import validate_bronze
         result = validate_bronze(df, source_name="rejected")
         if not result["success"]:
-            logger.warning(f"Bronze validation failed: {result}")
+            config.enforce_data_quality("Bronze (rejected)", str(result))
     except ImportError:
         pass
 

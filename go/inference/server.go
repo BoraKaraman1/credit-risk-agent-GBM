@@ -41,6 +41,15 @@ const numAdverseActions = 4
 // Feature staleness cutoff, mirroring the Python service.
 const stalenessHours = 720
 
+// Request limits. A caller must not be able to exhaust memory, goroutines,
+// or DB connections cheaply: bodies are capped, batches are bounded, and
+// applicant IDs are length- and charset-checked.
+const (
+	maxRequestBytes   = 1 << 20 // 1 MiB request body
+	maxBatchSize      = 1000    // applicants per /score/batch call
+	maxApplicantIDLen = 64
+)
+
 // Human-readable feature name mapping (all 33 Gold features)
 var featureDisplayNames = map[string]string{
 	"loan_amnt":              "Loan Amount",
@@ -162,6 +171,7 @@ type healthResponse struct {
 	ModelLoadedAt string `json:"model_loaded_at"`
 	NFeatures     int    `json:"n_features"`
 	Calibrated    bool   `json:"calibrated"`
+	Database      string `json:"database"`
 }
 
 // httpError mirrors FastAPI's HTTPException ({"detail": ...} body).
@@ -180,14 +190,18 @@ type server struct {
 	dbMu sync.Mutex
 	db   *db.DB
 
-	apiKeys [][]byte
-	limiter *rateLimiter
+	apiKeys    [][]byte
+	limiter    *rateLimiter
+	trustProxy bool
 }
 
 func (s *server) loadModel() error {
 	m, err := model.Load(config.ChampionModelPath())
 	if err != nil {
 		return fmt.Errorf("%w (run pipeline/export_model_json.py to export the champion model)", err)
+	}
+	if err := checkModelGovernance(m); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	s.model = m
@@ -196,6 +210,29 @@ func (s *server) loadModel() error {
 	setModelInfo(m.Version)
 	slog.Info("model loaded", "version", m.Version, "n_features", m.NFeatures, "trees", len(m.Trees))
 	return nil
+}
+
+// checkModelGovernance enforces the model-card verdict (SR 11-7): a
+// champion whose validation status is not APPROVED must not serve
+// production traffic unless an audited override (ALLOW_UNAPPROVED_MODEL)
+// is supplied. A model exported without any validation_status (legacy or
+// tampered) is treated as unapproved and fails closed for the same reason.
+func checkModelGovernance(m *model.Model) error {
+	if m.ValidationStatus != nil && m.ValidationStatus.Status == "APPROVED" {
+		return nil
+	}
+	status, rationale := "missing", "model exported without a validation_status; re-run pipeline/export_model_json.py"
+	if m.ValidationStatus != nil {
+		status, rationale = m.ValidationStatus.Status, m.ValidationStatus.Rationale
+	}
+	if config.AllowUnapprovedModel() {
+		slog.Warn("serving a non-APPROVED model under audited override (ALLOW_UNAPPROVED_MODEL=true)",
+			"version", m.Version, "status", status, "rationale", rationale)
+		return nil
+	}
+	return fmt.Errorf("model %s validation status is %q, not APPROVED: %s "+
+		"(set ALLOW_UNAPPROVED_MODEL=true to serve it under documented sign-off)",
+		m.Version, status, rationale)
 }
 
 func (s *server) currentModel() (*model.Model, string) {
@@ -213,7 +250,8 @@ func (s *server) getDB(ctx context.Context) (*db.DB, error) {
 	}
 	d, err := db.Connect(ctx, config.DatabaseURL())
 	if err != nil {
-		return nil, &httpError{500, err.Error()}
+		logger(ctx).Error("database connection failed", "error", err)
+		return nil, &httpError{500, "internal server error"}
 	}
 	s.db = d
 	return d, nil
@@ -291,7 +329,8 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 		return nil, &httpError{404, fmt.Sprintf("Applicant %s not found in feature store", applicantID)}
 	}
 	if err != nil {
-		return nil, &httpError{500, err.Error()}
+		logger(ctx).Error("feature fetch failed", "applicant_id", applicantID, "error", err)
+		return nil, &httpError{500, "internal server error"}
 	}
 
 	if feat.ComputedAt != nil {
@@ -302,23 +341,52 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 		}
 	}
 
-	// Build feature vector in the model's column order; missing/null -> 0.0
+	// Feature-store schema contract: the stored snapshot's feature_version
+	// must match the version the model was exported against. A mismatch
+	// means the feature definitions changed under the model, so reject
+	// rather than score on incompatible inputs. Skipped when either side
+	// predates the version field (0) for backward compatibility.
+	if m.FeatureVersion != 0 && feat.FeatureVersion != 0 && m.FeatureVersion != feat.FeatureVersion {
+		logger(ctx).Error("feature version mismatch", "applicant_id", applicantID,
+			"store_version", feat.FeatureVersion, "model_version", m.Version, "model_feature_version", m.FeatureVersion)
+		return nil, &httpError{409, fmt.Sprintf(
+			"feature version mismatch for %s (store v%d, model expects v%d)",
+			applicantID, feat.FeatureVersion, m.FeatureVersion)}
+	}
+
+	// Build the feature vector in the model's column order. Missing values
+	// are preserved as NaN so the model's per-split missing routing fires
+	// exactly as in training (both prediction and SHAP route NaN via
+	// missing_go_to_left). A column absent from the snapshot — as opposed
+	// to present-but-null — signals a feature-schema mismatch and is
+	// rejected rather than silently scored as missing.
 	x := make([]float64, len(m.Features))
 	for i, col := range m.Features {
-		if v := feat.Features[col]; v != nil {
+		v, present := feat.Features[col]
+		if !present {
+			logger(ctx).Error("feature schema mismatch", "applicant_id", applicantID,
+				"missing_feature", col, "model_version", m.Version)
+			return nil, &httpError{500, "internal server error"}
+		}
+		if v == nil {
+			x[i] = math.NaN()
+		} else {
 			x[i] = *v
 		}
 	}
 
+	// The raw score is logged and monitored (the drift reference is built
+	// from raw scores). Credit decisions use the calibrated PD when the
+	// model carries a calibrator — the 0.15/0.30 thresholds are
+	// probabilities of default — and fall back to the raw score otherwise.
 	score := m.PredictProba(x)
-	decision := decide(score)
-	recordScore(score, decision)
+	decisionBasis := score
 
-	// Calibrated PD and scorecard score (absent on pre-calibration models)
 	var calibratedPD *float64
 	var scaledScore *int
 	if m.Calibration != nil {
 		pd := m.Calibration.Apply(score)
+		decisionBasis = pd
 		rounded := round(pd, 5)
 		calibratedPD = &rounded
 		if m.Scorecard != nil {
@@ -326,6 +394,9 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 			scaledScore = &sc
 		}
 	}
+
+	decision := decide(decisionBasis)
+	recordScore(score, decision)
 
 	// ECOA adverse action reasons (only for decline/review)
 	actions := []adverseAction{}
@@ -360,26 +431,69 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func writeError(w http.ResponseWriter, err error) {
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var he *httpError
 	if errors.As(err, &he) {
 		writeJSON(w, he.status, map[string]string{"detail": he.detail})
 		return
 	}
-	writeJSON(w, http.StatusInternalServerError, map[string]string{"detail": err.Error()})
+	// Unexpected non-httpError: log the detail server-side and return a
+	// generic message so internal state never reaches the client. The
+	// X-Request-ID header (set by instrument) ties it to the server logs.
+	logger(r.Context()).Error("unhandled request error", "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"detail": "internal server error"})
+}
+
+// decodeBody reads a capped, strictly-typed JSON request body. Unknown
+// fields are rejected, the body is limited to maxRequestBytes, and any
+// trailing data after the first JSON value is an error.
+func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("body must contain a single JSON object")
+	}
+	return nil
+}
+
+// validateApplicantID bounds the length and charset of an applicant ID so
+// it cannot smuggle oversized or unexpected input into queries and logs.
+func validateApplicantID(id string) error {
+	if id == "" {
+		return errors.New("applicant_id is required")
+	}
+	if len(id) > maxApplicantIDLen {
+		return fmt.Errorf("applicant_id exceeds %d characters", maxApplicantIDLen)
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return errors.New("applicant_id may contain only letters, digits, '_' and '-'")
+		}
+	}
+	return nil
 }
 
 func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ApplicantID string `json:"applicant_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ApplicantID == "" {
+	if err := decodeBody(w, r, &req); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": "applicant_id is required"})
+		return
+	}
+	if err := validateApplicantID(req.ApplicantID); err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": err.Error()})
 		return
 	}
 	resp, err := s.scoreApplicant(r.Context(), req.ApplicantID)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -389,12 +503,25 @@ func (s *server) handleScoreBatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ApplicantIDs []string `json:"applicant_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, &req); err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": "applicant_ids is required"})
+		return
+	}
+	if len(req.ApplicantIDs) == 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": "applicant_ids must not be empty"})
+		return
+	}
+	if len(req.ApplicantIDs) > maxBatchSize {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+			"detail": fmt.Sprintf("batch size %d exceeds maximum %d", len(req.ApplicantIDs), maxBatchSize)})
 		return
 	}
 	out := batchScoreResponse{Results: []scoreResponse{}, Errors: []batchError{}}
 	for _, aid := range req.ApplicantIDs {
+		if err := validateApplicantID(aid); err != nil {
+			out.Errors = append(out.Errors, batchError{ApplicantID: aid, Error: err.Error()})
+			continue
+		}
 		resp, err := s.scoreApplicant(r.Context(), aid)
 		if err != nil {
 			out.Errors = append(out.Errors, batchError{ApplicantID: aid, Error: err.Error()})
@@ -411,18 +538,34 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"detail": "Model not loaded"})
 		return
 	}
-	writeJSON(w, http.StatusOK, healthResponse{
+	resp := healthResponse{
 		Status:        "ok",
 		ModelVersion:  m.Version,
 		ModelLoadedAt: loadedAt,
 		NFeatures:     m.NFeatures,
 		Calibrated:    m.Calibration != nil,
-	})
+		Database:      "not_configured",
+	}
+	// Readiness includes the feature store: a healthy model with an
+	// unreachable database cannot actually score, so report it degraded.
+	status := http.StatusOK
+	if config.DatabaseURL() != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if d, err := s.getDB(ctx); err != nil {
+			resp.Database, resp.Status, status = "unreachable", "degraded", http.StatusServiceUnavailable
+		} else if err := d.Ping(ctx); err != nil {
+			resp.Database, resp.Status, status = "unreachable", "degraded", http.StatusServiceUnavailable
+		} else {
+			resp.Database = "ok"
+		}
+	}
+	writeJSON(w, status, resp)
 }
 
 func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if err := s.loadModel(); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	m, _ := s.currentModel()
@@ -441,15 +584,23 @@ func Serve() {
 	config.LoadEnv()
 
 	s := &server{
-		apiKeys: parseAPIKeys(config.APIKeys()),
-		limiter: newRateLimiter(config.RateLimitRPS(), config.RateLimitBurst()),
+		apiKeys:    parseAPIKeys(config.APIKeys()),
+		limiter:    newRateLimiter(config.RateLimitRPS(), config.RateLimitBurst()),
+		trustProxy: config.TrustProxyHeaders(),
 	}
 	if err := s.loadModel(); err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
+	// Fail closed: refuse to start unauthenticated unless explicitly
+	// allowed for local development.
 	if len(s.apiKeys) == 0 {
-		slog.Warn("API authentication disabled: set API_KEYS to require an X-API-Key header")
+		if !config.AllowUnauthenticatedDev() {
+			slog.Error("refusing to start without authentication: set API_KEYS, " +
+				"or ALLOW_UNAUTHENTICATED_DEV=true for local development only")
+			os.Exit(1)
+		}
+		slog.Warn("API authentication DISABLED via ALLOW_UNAUTHENTICATED_DEV — do not use in production")
 	} else {
 		slog.Info("API authentication enabled", "keys", len(s.apiKeys))
 	}
@@ -459,7 +610,10 @@ func Serve() {
 	mux.Handle("POST /score/batch", instrument("/score/batch", s.protect(http.HandlerFunc(s.handleScoreBatch))))
 	mux.Handle("POST /reload", instrument("/reload", s.protect(http.HandlerFunc(s.handleReload))))
 	mux.Handle("GET /health", instrument("/health", http.HandlerFunc(s.handleHealth)))
-	mux.Handle("GET /metrics", promhttp.Handler())
+	// /metrics carries operational detail (score distribution, model
+	// version), so it sits behind authentication too — but not the
+	// per-client rate limiter, which would throttle Prometheus scrapes.
+	mux.Handle("GET /metrics", instrument("/metrics", s.authMiddleware(promhttp.Handler())))
 
 	port := os.Getenv("PORT")
 	if port == "" {

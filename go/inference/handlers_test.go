@@ -262,14 +262,18 @@ func TestHandleScoreValidation(t *testing.T) {
 			t.Errorf("status = %d, want 503", rec.Code)
 		}
 	})
-	t.Run("500 without DATABASE_URL", func(t *testing.T) {
+	t.Run("500 without DATABASE_URL returns a generic message", func(t *testing.T) {
 		t.Setenv("DATABASE_URL", "")
 		rec := postJSON(t, s.handleScore, `{"applicant_id": "LC_1"}`)
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want 500", rec.Code)
 		}
-		if !strings.Contains(decodeDetail(t, rec), "DATABASE_URL") {
-			t.Errorf("detail = %q", decodeDetail(t, rec))
+		detail := decodeDetail(t, rec)
+		if strings.Contains(detail, "DATABASE_URL") {
+			t.Errorf("internal detail leaked to client: %q", detail)
+		}
+		if detail != "internal server error" {
+			t.Errorf("detail = %q, want generic message", detail)
 		}
 	})
 }
@@ -310,9 +314,87 @@ func TestHandleReloadFailure(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
-	if detail := decodeDetail(t, rec); !strings.Contains(detail, "export_model_json") {
-		t.Errorf("detail should point at the export script, got %q", detail)
+	// The export-script hint goes to the server logs; the client gets a
+	// generic message (no filesystem paths leaked).
+	if detail := decodeDetail(t, rec); detail != "internal server error" {
+		t.Errorf("reload failure should return a generic message, got %q", detail)
 	}
+}
+
+func TestValidateApplicantID(t *testing.T) {
+	for _, id := range []string{"LC_1", "LC_0000001", "abc-123", "A_b-9"} {
+		if err := validateApplicantID(id); err != nil {
+			t.Errorf("validateApplicantID(%q) = %v, want nil", id, err)
+		}
+	}
+	for _, id := range []string{"", "has space", "semi;colon", "drop'table", strings.Repeat("x", maxApplicantIDLen+1)} {
+		if err := validateApplicantID(id); err == nil {
+			t.Errorf("validateApplicantID(%q) = nil, want error", id)
+		}
+	}
+}
+
+func TestHandleScoreUnknownField(t *testing.T) {
+	s := &server{model: syntheticAPIModel()}
+	rec := postJSON(t, s.handleScore, `{"applicant_id":"LC_1","surprise":1}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 for unknown field", rec.Code)
+	}
+}
+
+func TestHandleScoreTrailingData(t *testing.T) {
+	s := &server{model: syntheticAPIModel()}
+	rec := postJSON(t, s.handleScore, `{"applicant_id":"LC_1"} {"applicant_id":"LC_2"}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 for trailing data after the JSON object", rec.Code)
+	}
+}
+
+func TestHandleScoreBatchLimits(t *testing.T) {
+	s := &server{model: syntheticAPIModel()}
+	t.Run("empty list is 422", func(t *testing.T) {
+		rec := postJSON(t, s.handleScoreBatch, `{"applicant_ids":[]}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("status = %d, want 422", rec.Code)
+		}
+	})
+	t.Run("oversized batch is 413", func(t *testing.T) {
+		ids := make([]string, maxBatchSize+1)
+		for i := range ids {
+			ids[i] = "LC_1"
+		}
+		body, _ := json.Marshal(map[string][]string{"applicant_ids": ids})
+		rec := postJSON(t, s.handleScoreBatch, string(body))
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("status = %d, want 413", rec.Code)
+		}
+	})
+}
+
+func TestCheckModelGovernance(t *testing.T) {
+	approved := &model.Model{Version: "v1", ValidationStatus: &model.ValidationStatus{Status: "APPROVED"}}
+	if err := checkModelGovernance(approved); err != nil {
+		t.Errorf("APPROVED model blocked: %v", err)
+	}
+	// A model without an embedded validation_status fails closed.
+	missing := &model.Model{Version: "v1"}
+	if err := checkModelGovernance(missing); err == nil {
+		t.Error("model with missing validation_status should be blocked without override")
+	}
+	review := &model.Model{Version: "v1",
+		ValidationStatus: &model.ValidationStatus{Status: "REVIEW REQUIRED", Rationale: "DIR violations"}}
+	if err := checkModelGovernance(review); err == nil {
+		t.Error("REVIEW REQUIRED model should be blocked without override")
+	}
+	t.Run("audited override allows unapproved and missing", func(t *testing.T) {
+		t.Setenv("ALLOW_UNAPPROVED_MODEL", "true")
+		if err := checkModelGovernance(review); err != nil {
+			t.Errorf("override should allow REVIEW REQUIRED: %v", err)
+		}
+		if err := checkModelGovernance(missing); err != nil {
+			t.Errorf("override should allow missing status: %v", err)
+		}
+	})
 }
 
 func TestDecide(t *testing.T) {

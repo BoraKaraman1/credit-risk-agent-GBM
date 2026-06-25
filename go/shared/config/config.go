@@ -71,6 +71,32 @@ func ChallengerModelPath() string { return filepath.Join(ChallengerDir(), "model
 
 func DatabaseURL() string { return os.Getenv("DATABASE_URL") }
 
+// boolEnv reports whether an environment variable is set to a truthy
+// value (1/true/yes, case-insensitive).
+func boolEnv(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// AllowUnauthenticatedDev permits the scoring API to start without any
+// API_KEYS configured. Off by default so the API fails closed in
+// production; intended only for local development.
+func AllowUnauthenticatedDev() bool { return boolEnv("ALLOW_UNAUTHENTICATED_DEV") }
+
+// AllowUnapprovedModel is the audited override that lets the serving
+// governance gate load a champion whose model card is not APPROVED
+// (SR 11-7). Off by default so non-APPROVED models fail closed.
+func AllowUnapprovedModel() bool { return boolEnv("ALLOW_UNAPPROVED_MODEL") }
+
+// TrustProxyHeaders reports whether the X-Forwarded-For header should be
+// trusted to determine the client IP. Enable only when the API sits behind
+// a trusted reverse proxy / load balancer; off by default so a direct
+// client cannot spoof its identity to evade per-client rate limiting.
+func TrustProxyHeaders() bool { return boolEnv("TRUST_PROXY_HEADERS") }
+
 // APIKeys returns the accepted API keys from API_KEYS (comma-separated).
 // An empty slice means authentication is disabled.
 func APIKeys() []string {

@@ -20,10 +20,16 @@ ENV PYTHONPATH=/opt/airflow \
     LOG_LEVEL=INFO \
     CREDIT_RISK_GO_BIN=/opt/airflow/bin \
     CREDIT_RISK_DATA_DIR=/opt/airflow/data \
+    CREDIT_RISK_STRICT_DQ=true \
     PYTHON_BIN=python
 
-COPY requirements/base.txt requirements/pipeline.txt /tmp/requirements/
-RUN pip install --no-cache-dir -r /tmp/requirements/pipeline.txt
+# Pin pipeline deps to known-good versions (constraints.txt) so the image
+# build is reproducible and does not silently pull untested upgrades onto
+# the pinned apache/airflow base. (Reconciling these against Airflow's own
+# constraints file requires moving to an Airflow release compatible with
+# great-expectations >= 1.0; tracked as a follow-up.)
+COPY requirements/base.txt requirements/pipeline.txt requirements/constraints.txt /tmp/requirements/
+RUN pip install --no-cache-dir -c /tmp/requirements/constraints.txt -r /tmp/requirements/pipeline.txt
 
 COPY --chown=airflow:0 dags/ /opt/airflow/dags/
 COPY --chown=airflow:0 pipeline/ /opt/airflow/pipeline/

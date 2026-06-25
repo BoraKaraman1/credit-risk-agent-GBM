@@ -6,14 +6,19 @@ Returns structured validation results for pipeline integration.
 
 import json
 import logging
+import sys
 import great_expectations as gx
 import pandas as pd
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import config
+
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-GOLD_DIR = DATA_DIR / "gold"
+DATA_DIR = config.data_dir()
+GOLD_DIR = config.gold_dir()
 
 # Expected Gold feature columns (loaded from metadata at validation time)
 BINARY_COLUMNS = [

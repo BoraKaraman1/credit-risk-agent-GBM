@@ -30,11 +30,16 @@ func syncFeatures(ctx context.Context, d *db.DB) error {
 	}
 	var meta struct {
 		FeatureColumns []string `json:"feature_columns"`
+		FeatureVersion int      `json:"feature_version"`
 	}
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return err
 	}
 	featureCols := meta.FeatureColumns
+	featureVersion := meta.FeatureVersion
+	if featureVersion == 0 {
+		featureVersion = 1 // legacy metadata without the field
+	}
 
 	// Test set only — simulates active applicants awaiting scoring
 	// (training data is historical, not needed in the feature store)
@@ -68,7 +73,7 @@ func syncFeatures(ctx context.Context, d *db.DB) error {
 
 			row := db.FeatureRow{
 				ApplicantID:      fmt.Sprintf("LC_%07d", i),
-				FeatureVersion:   1,
+				FeatureVersion:   featureVersion,
 				ComputedAt:       now,
 				Features:         features,
 				DataCompleteness: completeness,

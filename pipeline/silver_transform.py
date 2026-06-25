@@ -5,15 +5,20 @@ Only origination-time columns are kept (no leakage).
 """
 
 import logging
+import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import config
+
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-BRONZE_DIR = DATA_DIR / "bronze"
-SILVER_DIR = DATA_DIR / "silver"
+DATA_DIR = config.data_dir()
+BRONZE_DIR = config.bronze_dir()
+SILVER_DIR = config.silver_dir()
 
 # Columns available at origination — no post-origination leakage
 ORIGINATION_COLS = [
@@ -136,7 +141,7 @@ def transform_accepted():
     null_pcts = df.isnull().mean()
     failing = null_pcts[null_pcts > 0.05]
     if len(failing) > 0:
-        logger.warning(f"Columns with >5% null: {failing.to_dict()}")
+        config.enforce_data_quality("Silver", f"columns >5% null: {failing.to_dict()}")
     else:
         logger.info("Quality gate passed: all columns <5% null")
 
@@ -148,7 +153,7 @@ def transform_accepted():
         from pipeline.data_quality import validate_silver
         result = validate_silver(df)
         if not result["success"]:
-            logger.warning(f"Silver validation failed: {result}")
+            config.enforce_data_quality("Silver", str(result))
     except ImportError:
         pass
 

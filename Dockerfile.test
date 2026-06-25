@@ -14,7 +14,7 @@ RUN apt-get update \
 
 COPY requirements/ ./requirements/
 RUN pip install --upgrade pip \
-    && pip install -r requirements/test.txt
+    && pip install -c requirements/constraints.txt -r requirements/test.txt
 
 COPY pipeline/ ./pipeline/
 COPY tests/ ./tests/

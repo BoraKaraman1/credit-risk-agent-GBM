@@ -5,6 +5,7 @@
 //	gbm drift             drift monitor (PSI/CSI)
 //	gbm performance       performance monitor (AUC/KS/Gini)
 //	gbm retrain [reason]  retrain orchestrator (default reason: manual)
+//	gbm promote           atomically promote challenger to champion
 //	gbm backfill          mature scoring_log outcomes from Gold labels
 //	gbm sync              bulk feature-store upsert
 package main
@@ -27,6 +28,7 @@ commands:
   drift              run the drift monitor (PSI/CSI)
   performance        run the performance monitor (AUC/KS/Gini)
   retrain [reason]   run the retrain orchestrator (default reason: manual)
+  promote            atomically promote the challenger to champion
   backfill           backfill scoring_log outcomes from Gold labels
   sync               sync Gold features to the feature store
 `)
@@ -50,6 +52,8 @@ func main() {
 			reason = os.Args[2]
 		}
 		monitoring.RunRetrain(reason)
+	case "promote":
+		monitoring.RunPromote()
 	case "backfill":
 		monitoring.RunBackfill()
 	case "sync":

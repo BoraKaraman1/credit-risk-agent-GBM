@@ -68,7 +68,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 ├── go/                           # Serving layer (see go/README.md)
 │   ├── main.go                   # single `gbm` binary; dispatches subcommands
 │   ├── inference/                # gbm serve — /score, /score/batch, /health, /reload, /metrics
-│   ├── monitoring/               # gbm drift|performance|backfill|retrain|sync
+│   ├── monitoring/               # gbm drift|performance|backfill|retrain|promote|sync
 │   ├── db/                       # pgx Supabase access + JSONB audit inserts
 │   └── shared/
 │       ├── model/                # GBM inference + TreeSHAP (verified vs sklearn/shap)
@@ -90,11 +90,12 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 │   ├── test_fairness.py          # Fairness metric tests
 │   └── test_data_quality.py      # Data quality validation tests
 ├── requirements/                 # Split dependency sets by runtime
-│   ├── api.txt                   # FastAPI scoring image
+│   ├── base.txt                  # Core ML libraries (shared)
 │   ├── pipeline.txt              # Batch training/sync jobs
 │   ├── airflow.txt               # Airflow runtime
 │   ├── test.txt                  # Test runner
-│   └── dev.txt                   # Full local development install
+│   ├── dev.txt                   # Full local development install
+│   └── constraints.txt           # Pinned versions for reproducible installs
 ├── Dockerfile.api                # Go scoring API container (multi-stage)
 ├── Dockerfile.pipeline           # Batch pipeline/training container (Python)
 ├── Dockerfile.airflow            # Airflow DAG container (Python + Go binaries)
@@ -192,10 +193,11 @@ python pipeline/reject_inference.py
 The API is a single Go binary that loads the exported champion (`data/models/champion/model.json`) and computes predictions and TreeSHAP adverse actions natively.
 
 ```bash
-# Start the API
-PORT=8000 ./go/bin/gbm serve
+# Start the API (auth required; use ALLOW_UNAUTHENTICATED_DEV=true for
+# local development without keys)
+API_KEYS=your-key PORT=8000 ./go/bin/gbm serve
 
-# Score an applicant (X-API-Key only needed when API_KEYS is set)
+# Score an applicant
 curl -X POST http://localhost:8000/score \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
@@ -207,19 +209,19 @@ curl -X POST http://localhost:8000/score/batch \
   -H "X-API-Key: your-key" \
   -d '{"applicant_ids": ["LC_0000001", "LC_0000002"]}'
 
-# Health check (open)
+# Health check (open; reports model + database readiness)
 curl http://localhost:8000/health
 
-# Prometheus metrics (open)
-curl http://localhost:8000/metrics
+# Prometheus metrics (authenticated; X-API-Key or Bearer token)
+curl http://localhost:8000/metrics -H "X-API-Key: your-key"
 
 # Hot-reload model (after re-running pipeline/export_model_json.py)
 curl -X POST http://localhost:8000/reload -H "X-API-Key: your-key"
 ```
 
-**Decision rules:**
-| Score Range | Decision |
-|-------------|----------|
+**Decision rules** (applied to the calibrated PD; pre-calibration models fall back to the raw score):
+| Calibrated PD | Decision |
+|---------------|----------|
 | PD < 0.15 | Approve |
 | 0.15 <= PD < 0.30 | Manual Review |
 | PD >= 0.30 | Decline |
@@ -230,8 +232,8 @@ Raw GBM scores rank-order well but are not calibrated PDs, and everything downst
 
 Each response carries three numbers:
 
-- `score`: the raw model probability (logged and monitored, unchanged semantics)
-- `pd`: the calibrated probability of default
+- `score`: the raw model probability, logged and monitored (the drift reference distribution is built on raw scores)
+- `pd`: the calibrated probability of default — this is what the credit decision is made on (the API falls back to the raw score only for pre-calibration models)
 - `scaled_score`: an industry-style scorecard score from points-to-double-odds scaling, anchored at 600 = 30:1 good:bad odds with 20 points to double the odds
 
 Go calibration and scaling match the sklearn calibrator to 1e-9 on the parity fixtures.
@@ -269,9 +271,9 @@ Example response (truncated):
 
 ### Authentication and Rate Limiting
 
-`/score`, `/score/batch`, and `/reload` sit behind two middlewares; `/health` and `/metrics` stay open.
+`/score`, `/score/batch`, `/reload`, and `/metrics` require authentication; `/health` stays open. `/metrics` skips the rate limiter so scrapes are not throttled.
 
-- **API keys**: set `API_KEYS` to a comma-separated list. Callers send one in the `X-API-Key` header, compared in constant time. When `API_KEYS` is unset the API is open and logs a warning at startup, so local development and the existing tests keep working unchanged.
+- **API keys**: set `API_KEYS` to a comma-separated list. Callers send one in the `X-API-Key` header (or `Authorization: Bearer <key>`), compared in constant time. The API **fails closed**: with no `API_KEYS` it refuses to start unless `ALLOW_UNAUTHENTICATED_DEV=true` is set for local development.
 - **Rate limiting**: a per-client token bucket (`golang.org/x/time/rate`), keyed by API key when authenticated and by client IP otherwise. Defaults are 20 req/s sustained with a burst of 40, tunable via `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST`. Over-budget requests get `429` with a `Retry-After` header.
 
 Every request gets an `X-Request-ID` (generated, or the incoming one echoed back) that ties together the structured access logs.
@@ -300,6 +302,10 @@ These are `gbm` subcommands that print a JSON report to stdout and log results t
 
 # Retrain orchestrator — train challenger (via Python), compare, recommend
 ./go/bin/gbm retrain manual
+
+# Promote challenger — publish as an immutable versioned dir and
+# atomically repoint the champion symlink (no no-champion window)
+./go/bin/gbm promote
 ```
 
 The outcome backfill closes the monitoring loop. The scoring API cannot know an applicant's real outcome at decision time, so `scoring_log.actual_default` starts NULL and the performance monitor falls back to the test-set proxy. This job simulates outcomes arriving: for applicants scored at least `OUTCOME_BACKFILL_DELAY_DAYS` ago, it writes back the true label from the Gold test set. Once enough outcomes accumulate, the performance monitor runs on production data.
@@ -451,10 +457,10 @@ The API image runs as a non-root user and exposes `/health` as its Docker health
 
 ### Local Compose Stack
 
-Start local Postgres, initialize `pipeline/supabase_schema.sql`, and run the API against the mounted local champion model:
+Start local Postgres, initialize `pipeline/supabase_schema.sql`, and run the API against the mounted local champion model. The bundled demo champion is `REVIEW REQUIRED` (structural disparities in the public LendingClub data), so the governance gate fails closed by default; explicitly accept serving an unapproved model to run the demo:
 
 ```bash
-docker compose up --build postgres api
+ALLOW_UNAPPROVED_MODEL=true docker compose up --build postgres api
 ```
 
 ### Pipeline Image

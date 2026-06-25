@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -73,7 +74,7 @@ func TestAuthMiddleware(t *testing.T) {
 		req.Header.Set("X-API-Key", "secret")
 		var gotClient string
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotClient = clientID(r)
+			gotClient = clientID(r, false)
 			w.WriteHeader(http.StatusOK)
 		})
 		withKeys.authMiddleware(next).ServeHTTP(rec, req)
@@ -84,6 +85,40 @@ func TestAuthMiddleware(t *testing.T) {
 			t.Errorf("clientID = %q, want key:secret", gotClient)
 		}
 	})
+}
+
+func TestPresentedKey(t *testing.T) {
+	cases := []struct {
+		name   string
+		header [2]string
+		want   string
+	}{
+		{"x-api-key", [2]string{"X-API-Key", "abc"}, "abc"},
+		{"bearer", [2]string{"Authorization", "Bearer xyz"}, "xyz"},
+		{"none", [2]string{"", ""}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if tc.header[0] != "" {
+				req.Header.Set(tc.header[0], tc.header[1])
+			}
+			if got := presentedKey(req); got != tc.want {
+				t.Errorf("presentedKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuthMiddlewareBearer(t *testing.T) {
+	withKeys := &server{apiKeys: parseAPIKeys([]string{"secret"})}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	withKeys.authMiddleware(okHandler()).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 for Bearer auth", rec.Code)
+	}
 }
 
 func TestRateLimitMiddleware(t *testing.T) {
@@ -116,12 +151,14 @@ func TestClientIP(t *testing.T) {
 		name       string
 		remoteAddr string
 		xff        string
+		trust      bool
 		want       string
 	}{
-		{"remote addr with port", "1.2.3.4:5555", "", "1.2.3.4"},
-		{"x-forwarded-for single", "10.0.0.1:1", "203.0.113.5", "203.0.113.5"},
-		{"x-forwarded-for chain takes first", "10.0.0.1:1", "203.0.113.1, 70.41.3.18", "203.0.113.1"},
-		{"remote addr without port", "unixsocket", "", "unixsocket"},
+		{"remote addr with port", "1.2.3.4:5555", "", false, "1.2.3.4"},
+		{"trusted x-forwarded-for single", "10.0.0.1:1", "203.0.113.5", true, "203.0.113.5"},
+		{"trusted x-forwarded-for chain takes first", "10.0.0.1:1", "203.0.113.1, 70.41.3.18", true, "203.0.113.1"},
+		{"untrusted x-forwarded-for is ignored", "10.0.0.1:1", "203.0.113.5", false, "10.0.0.1"},
+		{"remote addr without port", "unixsocket", "", false, "unixsocket"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,7 +167,7 @@ func TestClientIP(t *testing.T) {
 			if tc.xff != "" {
 				req.Header.Set("X-Forwarded-For", tc.xff)
 			}
-			if got := clientIP(req); got != tc.want {
+			if got := clientIP(req, tc.trust); got != tc.want {
 				t.Errorf("clientIP = %q, want %q", got, tc.want)
 			}
 		})
@@ -140,8 +177,26 @@ func TestClientIP(t *testing.T) {
 func TestClientIDFallsBackToIP(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/score", nil)
 	req.RemoteAddr = "8.8.8.8:1234"
-	if got := clientID(req); got != "ip:8.8.8.8" {
+	if got := clientID(req, false); got != "ip:8.8.8.8" {
 		t.Errorf("clientID = %q, want ip:8.8.8.8", got)
+	}
+}
+
+func TestRateLimiterEviction(t *testing.T) {
+	rl := newRateLimiter(1, 1)
+	t0 := time.Unix(1_700_000_000, 0)
+	rl.get("a", t0)
+	if len(rl.clients) != 1 {
+		t.Fatalf("clients = %d, want 1", len(rl.clients))
+	}
+	// A request past the idle TTL + sweep interval triggers a sweep that
+	// evicts the now-idle "a" while registering the active "b".
+	rl.get("b", t0.Add(limiterIdleTTL+2*limiterSweepEvery))
+	if _, ok := rl.clients["a"]; ok {
+		t.Error("idle client 'a' should have been evicted")
+	}
+	if _, ok := rl.clients["b"]; !ok {
+		t.Error("active client 'b' should still be present")
 	}
 }
 

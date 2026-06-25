@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -40,7 +41,12 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		return nil, err
 	}
 
-	// Training scores (reference distribution)
+	// Training scores (reference distribution). These are recomputed from
+	// the local Gold parquet by scoring the train set with the CURRENT
+	// champion, so the PSI reference always matches the model under test.
+	// (The training_distribution table written by `gbm sync` is a snapshot
+	// for external dashboards; it is intentionally not used here because a
+	// prior model's stored histogram would not match the current champion.)
 	train, err := gold.ReadColumns(filepath.Join(config.GoldDir(), "features_train.parquet"), m.Features)
 	if err != nil {
 		return nil, err
@@ -51,21 +57,31 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 	}
 	trainScores := m.PredictProbaBatch(trainRows)
 
-	// Production scores: Supabase scoring_log first, test set as fallback
+	// Production scores and per-feature columns: Supabase scoring_log first
+	// (real scored applicants for the current model version), test set as
+	// fallback. prodFeatureCols drives CSI in both modes.
 	var (
-		productionScores   []float64
-		productionFeatures *gold.Frame
-		database           *db.DB
+		productionScores []float64
+		prodFeatureCols  map[string][]float64
+		database         *db.DB
 	)
 	if config.DatabaseURL() != "" {
 		if d, err := db.Connect(ctx, config.DatabaseURL()); err == nil {
 			database = d
 			defer d.Close()
-			if scores, err := d.RecentScores(ctx, 50000); err != nil {
+			if scores, err := d.RecentScores(ctx, m.Version, 50000); err != nil {
 				slog.Warn("could not read scoring_log", "error", err)
 			} else if len(scores) > 0 {
 				productionScores = scores
 				slog.Info("using scores from scoring_log", "n", len(scores))
+				// Compute CSI on the same scored applicants' feature
+				// snapshots so feature drift is visible in real production
+				// mode, not only when falling back to the test set.
+				if snaps, err := d.RecentFeatureSnapshots(ctx, m.Version, 50000); err != nil {
+					slog.Warn("could not read feature snapshots for CSI", "error", err)
+				} else if len(snaps) > 0 {
+					prodFeatureCols = featureColumnsFromSnapshots(snaps, m.Features)
+				}
 			}
 		} else {
 			slog.Warn("could not connect to Supabase", "error", err)
@@ -81,7 +97,7 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 			return nil, err
 		}
 		productionScores = m.PredictProbaBatch(testRows)
-		productionFeatures = test
+		prodFeatureCols = test.Columns
 		slog.Info("using test set as production proxy")
 	}
 
@@ -98,15 +114,13 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 
 	// --- CSI on individual features ---
 	csiResults := map[string]float64{}
-	if productionFeatures != nil {
-		for _, col := range m.Features {
-			prodCol, ok := productionFeatures.Columns[col]
-			if !ok {
-				continue
-			}
-			csi := metrics.CSI(train.Columns[col], prodCol, 10)
-			csiResults[col] = round(csi, 4)
+	for _, col := range m.Features {
+		prodCol, ok := prodFeatureCols[col]
+		if !ok {
+			continue
 		}
+		csi := metrics.CSI(train.Columns[col], prodCol, 10)
+		csiResults[col] = round(csi, 4)
 	}
 	drifted := map[string]float64{}
 	for k, v := range csiResults {
@@ -152,6 +166,26 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 	return rep, nil
 }
 
+// featureColumnsFromSnapshots pivots scoring_log feature snapshots into
+// per-feature columns for CSI. Missing or null values become NaN, which
+// metrics.CSI drops — the same treatment as the stored snapshots.
+func featureColumnsFromSnapshots(snaps []map[string]*float64, features []string) map[string][]float64 {
+	cols := make(map[string][]float64, len(features))
+	for _, col := range features {
+		cols[col] = make([]float64, 0, len(snaps))
+	}
+	for _, snap := range snaps {
+		for _, col := range features {
+			if v, ok := snap[col]; ok && v != nil {
+				cols[col] = append(cols[col], *v)
+			} else {
+				cols[col] = append(cols[col], math.NaN())
+			}
+		}
+	}
+	return cols
+}
+
 func driftRecommendation(psi float64, psiStatus string, csiResults map[string]float64) string {
 	switch psiStatus {
 	case "CRITICAL":
@@ -188,5 +222,8 @@ func RunDrift() {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(rep)
+	if err := enc.Encode(rep); err != nil {
+		slog.Error("failed to encode drift report", "error", err)
+		os.Exit(1)
+	}
 }

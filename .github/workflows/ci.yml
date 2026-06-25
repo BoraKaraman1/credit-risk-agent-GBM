@@ -29,6 +29,13 @@ jobs:
           fi
       - name: go test
         run: go test ./...
+      - name: go test -race
+        run: go test -race ./...
+      - name: govulncheck
+        # Report-only: surfaces known vulnerabilities in called code paths
+        # without blocking (dependencies are pinned, not yet upgraded).
+        continue-on-error: true
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   python:
     name: Python lint and test
@@ -43,11 +50,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements/test.txt ruff
+          pip install -c requirements/constraints.txt -r requirements/test.txt ruff
       - name: ruff
         run: ruff check pipeline tests dags
       - name: pytest
         run: python -m pytest tests/ -q
+      - name: pip-audit
+        # Report-only: audits the pinned dependency set for known
+        # advisories without blocking (deps are pinned, not yet upgraded).
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements/constraints.txt
 
   docker:
     name: Docker build (${{ matrix.dockerfile }})

@@ -35,6 +35,9 @@ func Connect(ctx context.Context, databaseURL string) (*DB, error) {
 
 func (d *DB) Close() { d.Pool.Close() }
 
+// Ping verifies the connection pool can reach the database (readiness).
+func (d *DB) Ping(ctx context.Context) error { return d.Pool.Ping(ctx) }
+
 // InsertDriftLog mirrors agents/db_logging.py.
 func (d *DB) InsertDriftLog(ctx context.Context, metricName string, metricValue float64,
 	modelVersion string, details any) error {
@@ -70,6 +73,7 @@ type ApplicantFeatures struct {
 	DataCompleteness *float64
 	FicoScore        *int
 	Grade            *int
+	FeatureVersion   int
 	ComputedAt       *time.Time
 }
 
@@ -81,10 +85,11 @@ func (d *DB) FetchApplicantFeatures(ctx context.Context, applicantID string) (*A
 		out          ApplicantFeatures
 	)
 	err := d.Pool.QueryRow(ctx, `
-		SELECT features, data_completeness, fico_score, grade, computed_at
+		SELECT features, data_completeness, fico_score, grade, feature_version, computed_at
 		FROM applicant_features
 		WHERE applicant_id = $1`, applicantID).
-		Scan(&featuresJSON, &out.DataCompleteness, &out.FicoScore, &out.Grade, &out.ComputedAt)
+		Scan(&featuresJSON, &out.DataCompleteness, &out.FicoScore, &out.Grade,
+			&out.FeatureVersion, &out.ComputedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -98,10 +103,13 @@ func (d *DB) FetchApplicantFeatures(ctx context.Context, applicantID string) (*A
 }
 
 // RecentScores returns up to limit most recent production scores from
-// scoring_log.
-func (d *DB) RecentScores(ctx context.Context, limit int) ([]float64, error) {
+// scoring_log for one model version. Filtering by version keeps the drift
+// monitor from mixing a prior model's scores into the current model's
+// distribution after a model change.
+func (d *DB) RecentScores(ctx context.Context, modelVersion string, limit int) ([]float64, error) {
 	rows, err := d.Pool.Query(ctx,
-		`SELECT score FROM scoring_log ORDER BY scored_at DESC LIMIT $1`, limit)
+		`SELECT score FROM scoring_log WHERE model_version = $1 ORDER BY scored_at DESC LIMIT $2`,
+		modelVersion, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -117,15 +125,42 @@ func (d *DB) RecentScores(ctx context.Context, limit int) ([]float64, error) {
 	return scores, rows.Err()
 }
 
-// ScoredOutcomes returns scores with observed outcomes for
-// performance monitoring.
-func (d *DB) ScoredOutcomes(ctx context.Context, limit int) (yScore []float64, yTrue []int, err error) {
+// RecentFeatureSnapshots returns the feature_snapshot maps from the most
+// recent scoring_log rows for one model version, so the drift monitor can
+// compute production CSI on the same window of real scored applicants.
+func (d *DB) RecentFeatureSnapshots(ctx context.Context, modelVersion string, limit int) ([]map[string]*float64, error) {
+	rows, err := d.Pool.Query(ctx,
+		`SELECT feature_snapshot FROM scoring_log WHERE model_version = $1 ORDER BY scored_at DESC LIMIT $2`,
+		modelVersion, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]*float64
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		snap := map[string]*float64{}
+		if err := json.Unmarshal(raw, &snap); err != nil {
+			return nil, err
+		}
+		out = append(out, snap)
+	}
+	return out, rows.Err()
+}
+
+// ScoredOutcomes returns scores with observed outcomes for one model
+// version. Filtering by version keeps the performance monitor from scoring
+// a new champion against a prior model's observed outcomes.
+func (d *DB) ScoredOutcomes(ctx context.Context, modelVersion string, limit int) (yScore []float64, yTrue []int, err error) {
 	rows, err := d.Pool.Query(ctx, `
 		SELECT score, actual_default
 		FROM scoring_log
-		WHERE actual_default IS NOT NULL
+		WHERE model_version = $1 AND actual_default IS NOT NULL
 		ORDER BY outcome_observed_at DESC
-		LIMIT $1`, limit)
+		LIMIT $2`, modelVersion, limit)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -16,12 +16,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from pipeline import config
+
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
-GOLD_DIR = DATA_DIR / "gold"
-MODELS_DIR = DATA_DIR / "models"
+ROOT = config.ROOT
+GOLD_DIR = config.gold_dir()
+MODELS_DIR = config.models_dir()
 DEFAULT_OUTPUT = ROOT / "docs" / "model_card.md"
 
 
@@ -48,11 +51,13 @@ def _validation_status(meta):
 
 def _metrics_table(metrics):
     lines = ["| Split | AUC | KS | Gini |", "|-------|-----|----|----|"]
-    for split in ("train", "val", "test"):
-        m = metrics.get(split)
-        if not m:
-            continue
-        lines.append(f"| {split.capitalize()} | {m['auc']:.4f} | {m['ks']:.4f} | {m['gini']:.4f} |")
+    # Preferred display order; any other keys follow in insertion order.
+    order = ["train", "early_stopping", "val", "test"]
+    keys = [k for k in order if k in metrics] + [k for k in metrics if k not in order]
+    for split in keys:
+        m = metrics[split]
+        label = split.replace("_", " ").title()
+        lines.append(f"| {label} | {m['auc']:.4f} | {m['ks']:.4f} | {m['gini']:.4f} |")
     return "\n".join(lines)
 
 

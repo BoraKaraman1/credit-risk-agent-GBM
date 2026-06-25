@@ -31,6 +31,7 @@ type Tree struct {
 type Model struct {
 	FormatVersion      int                           `json:"format_version"`
 	Version            string                        `json:"model_version"`
+	FeatureVersion     int                           `json:"feature_version"`
 	NFeatures          int                           `json:"n_features"`
 	Features           []string                      `json:"features"`
 	Metrics            map[string]map[string]float64 `json:"metrics"`
@@ -38,9 +39,20 @@ type Model struct {
 	Trees              []Tree                        `json:"trees"`
 	Calibration        *Calibration                  `json:"calibration"`
 	Scorecard          *Scorecard                    `json:"scorecard"`
+	ValidationStatus   *ValidationStatus             `json:"validation_status"`
 
 	expectedValue     float64
 	expectedValueOnce sync.Once
+}
+
+// ValidationStatus is the model-card verdict embedded by the exporter
+// (pipeline/export_model_json.py, derived from model_card._validation_status).
+// The serving governance gate refuses to load a champion whose status is
+// not APPROVED unless an audited override is supplied. Models exported
+// before this field existed unmarshal to nil.
+type ValidationStatus struct {
+	Status    string `json:"status"`
+	Rationale string `json:"rationale"`
 }
 
 // Load reads a model.json produced by pipeline/export_model_json.py.
@@ -64,7 +76,43 @@ func Load(path string) (*Model, error) {
 			return nil, fmt.Errorf("model %s has malformed calibration", path)
 		}
 	}
+	if err := m.validateTrees(); err != nil {
+		return nil, fmt.Errorf("model %s: %w", path, err)
+	}
 	return &m, nil
+}
+
+// validateTrees checks every tree's node arrays are mutually consistent so
+// that leafValue and shap can never index out of bounds or loop. For each
+// internal node the child indexes must be in range and strictly greater
+// than the parent — the exporter appends children after their parent, an
+// invariant that also guarantees the graph is acyclic and traversal
+// terminates — and the split feature index must be within range.
+func (m *Model) validateTrees() error {
+	for ti := range m.Trees {
+		t := &m.Trees[ti]
+		n := len(t.IsLeaf)
+		if n == 0 {
+			return fmt.Errorf("tree %d is empty", ti)
+		}
+		if len(t.Value) != n || len(t.FeatureIdx) != n || len(t.NumThreshold) != n ||
+			len(t.MissingGoToLeft) != n || len(t.Left) != n || len(t.Right) != n {
+			return fmt.Errorf("tree %d has inconsistent node array lengths", ti)
+		}
+		for i := 0; i < n; i++ {
+			if t.IsLeaf[i] == 1 {
+				continue
+			}
+			l, r := int(t.Left[i]), int(t.Right[i])
+			if l <= i || r <= i || l >= n || r >= n {
+				return fmt.Errorf("tree %d node %d has invalid child indexes (%d, %d)", ti, i, l, r)
+			}
+			if fi := int(t.FeatureIdx[i]); fi < 0 || fi >= m.NFeatures {
+				return fmt.Errorf("tree %d node %d feature index %d out of range", ti, i, fi)
+			}
+		}
+	}
+	return nil
 }
 
 // leafValue walks one tree for a single row. Missing values (NaN)

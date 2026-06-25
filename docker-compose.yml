@@ -1,17 +1,21 @@
+# Local development stack. The credentials and published ports below are
+# convenience defaults for local use ONLY — not for production. Supply real
+# secrets via a .env file (POSTGRES_PASSWORD, API_KEYS, GRAFANA_ADMIN_PASSWORD)
+# and restrict or remove the published ports before any shared deployment.
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: credit_risk
-      POSTGRES_USER: credit_risk
-      POSTGRES_PASSWORD: credit_risk
+      POSTGRES_DB: ${POSTGRES_DB:-credit_risk}
+      POSTGRES_USER: ${POSTGRES_USER:-credit_risk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-credit_risk}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./pipeline/supabase_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U credit_risk -d credit_risk"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-credit_risk} -d ${POSTGRES_DB:-credit_risk}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -21,10 +25,20 @@ services:
       context: .
       dockerfile: Dockerfile.api
     environment:
-      DATABASE_URL: postgresql://credit_risk:credit_risk@postgres:5432/credit_risk
+      DATABASE_URL: postgresql://${POSTGRES_USER:-credit_risk}:${POSTGRES_PASSWORD:-credit_risk}@postgres:5432/${POSTGRES_DB:-credit_risk}
       CREDIT_RISK_MODELS_DIR: /models
       LOG_LEVEL: INFO
       PORT: 8000
+      # Authentication is required by default (the API fails closed
+      # otherwise). Override with your own keys via a .env file
+      # (API_KEYS=key1,key2); never ship this demo key to production.
+      API_KEYS: ${API_KEYS:-demo-local-key}
+      # The bundled demo champion is REVIEW REQUIRED — structural
+      # disparities in the public LendingClub data (see docs/model_card.md).
+      # The governance gate therefore fails closed by default; to run the
+      # demo you must explicitly accept serving an unapproved model, e.g.:
+      #   ALLOW_UNAPPROVED_MODEL=true docker compose up
+      ALLOW_UNAPPROVED_MODEL: ${ALLOW_UNAPPROVED_MODEL:-}
     ports:
       - "8000:8000"
     volumes:
@@ -57,8 +71,8 @@ services:
     image: grafana/grafana:11.2.0
     profiles: ["monitoring"]
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:

@@ -20,13 +20,13 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import calibrate, fairness, model_card
+from pipeline import calibrate, config, fairness, model_card
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-GOLD_DIR = DATA_DIR / "gold"
-MODELS_DIR = DATA_DIR / "models"
+DATA_DIR = config.data_dir()
+GOLD_DIR = config.gold_dir()
+MODELS_DIR = config.models_dir()
 
 
 def _model_path(directory):
@@ -168,13 +168,22 @@ def run(as_challenger=False):
         mlflow.log_param("n_test", len(X_test))
         mlflow.log_param("n_iterations", model.best_iteration_ or model.n_estimators_)
 
-        # Evaluate on all splits
+        # Evaluate. The model is fit on train+val, so X_val is in-sample
+        # and reporting it as a clean holdout would be optimistic. The
+        # early-stopping carve-out (never gradient-fitted) is the honest
+        # non-test estimate; test is the clean temporal holdout that the
+        # monitors baseline against. The same carve-out fits the calibrator.
+        _, X_es, _, y_es = early_stopping_split(X_train, y_train, X_val, y_val)
         train_metrics = evaluate_model(model, X_train, y_train, "train")
-        val_metrics = evaluate_model(model, X_val, y_val, "val")
+        early_stopping_metrics = evaluate_model(model, X_es, y_es, "early_stopping")
         test_metrics = evaluate_model(model, X_test, y_test, "test")
 
         # Log metrics
-        for split, metrics in [("train", train_metrics), ("val", val_metrics), ("test", test_metrics)]:
+        for split, metrics in [
+            ("train", train_metrics),
+            ("early_stopping", early_stopping_metrics),
+            ("test", test_metrics),
+        ]:
             for k, v in metrics.items():
                 mlflow.log_metric(f"{split}_{k}", v)
 
@@ -197,7 +206,7 @@ def run(as_challenger=False):
 
         all_metrics = {
             "train": train_metrics,
-            "val": val_metrics,
+            "early_stopping": early_stopping_metrics,
             "test": test_metrics,
         }
         save_model(model, feature_cols, all_metrics, version, dest, params=params)
@@ -206,16 +215,16 @@ def run(as_challenger=False):
 
         # Calibrate on the early-stopping carve-out (never gradient-fitted)
         logger.info("Fitting isotonic calibrator ...")
-        _, X_es, _, y_es = early_stopping_split(X_train, y_train, X_val, y_val)
         calibrator, cal_report = calibrate.calibrate_model(model, X_es, y_es, X_test, y_test)
         calibrate.save_calibration(dest, calibrator, cal_report)
         mlflow.log_metric("test_brier_raw", cal_report["brier_raw"])
         mlflow.log_metric("test_brier_calibrated", cal_report["brier_calibrated"])
 
-        # Fairness summary in metadata (feeds the model card and gate)
+        # Fairness summary in metadata (feeds the model card and gate).
+        # Decisions use the calibrated PD so the analysis matches serving.
         logger.info("Running fairness analysis ...")
         fair_summary = fairness.summarize(
-            fairness.run(model=model, X_test=X_test, y_test=y_test))
+            fairness.run(model=model, X_test=X_test, y_test=y_test, calibrator=calibrator))
         fairness.save_fairness(dest, fair_summary)
 
     # Validation report (champion only): a markdown model card for MRM.

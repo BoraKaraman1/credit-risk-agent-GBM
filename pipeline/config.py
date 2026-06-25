@@ -1,0 +1,57 @@
+"""
+Pipeline configuration: environment-aware paths and flags shared across
+the pipeline modules. Mirrors go/shared/config so the Python pipeline and
+the Go services agree on data/model locations in every deployment
+(CREDIT_RISK_DATA_DIR / CREDIT_RISK_MODELS_DIR), instead of each module
+hardcoding paths relative to its own file.
+"""
+
+import logging
+import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
+
+
+def data_dir() -> Path:
+    """Root of the data lake. Override with CREDIT_RISK_DATA_DIR."""
+    override = os.getenv("CREDIT_RISK_DATA_DIR")
+    return Path(override) if override else ROOT / "data"
+
+
+def bronze_dir() -> Path:
+    return data_dir() / "bronze"
+
+
+def silver_dir() -> Path:
+    return data_dir() / "silver"
+
+
+def gold_dir() -> Path:
+    return data_dir() / "gold"
+
+
+def models_dir() -> Path:
+    """Model registry. Override with CREDIT_RISK_MODELS_DIR."""
+    override = os.getenv("CREDIT_RISK_MODELS_DIR")
+    return Path(override) if override else data_dir() / "models"
+
+
+def strict_data_quality() -> bool:
+    """When true, data-quality validation failures abort the pipeline
+    instead of only logging a warning. Off by default for local
+    exploration; set CREDIT_RISK_STRICT_DQ=true in CI/production so bad
+    data cannot silently flow through to training and serving."""
+    return os.getenv("CREDIT_RISK_STRICT_DQ", "").strip().lower() in {"1", "true", "yes"}
+
+
+def enforce_data_quality(context: str, message: str) -> None:
+    """Handle a data-quality failure: raise in strict mode so the
+    pipeline/DAG task fails, otherwise log a warning. `context` names the
+    layer (e.g. "Silver"), `message` describes what failed."""
+    full = f"{context} data quality failed: {message}"
+    if strict_data_quality():
+        raise RuntimeError(full)
+    logger.warning(full)

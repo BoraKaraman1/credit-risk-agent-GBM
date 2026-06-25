@@ -9,8 +9,7 @@ together:
    per-client rate limiting, Prometheus metrics with request-ID logging,
    and server timeouts with graceful shutdown.
 
-Both are uncommitted at the time of writing. This document explains what
-changed, why, and how each part works.
+This document explains what changed, why, and how each part works.
 
 ---
 
@@ -97,7 +96,7 @@ calibration block loads and serves exactly as before.
 
 ### The Go side
 
-`go/internal/model/calibration.go` mirrors scikit-learn at inference:
+`go/shared/model/calibration.go` mirrors scikit-learn at inference:
 
 - `Calibration.Apply(p)` reproduces `IsotonicRegression(out_of_bounds=
   "clip")`. It clips to the breakpoint range, then linearly interpolates
@@ -120,10 +119,11 @@ request time.
 
 The scoring response now carries three numbers:
 
-- `score`: the raw model probability. Its meaning is unchanged. It still
-  drives decisions and audit logging, so the drift monitor's reference
-  distribution stays valid.
-- `pd`: the calibrated probability of default.
+- `score`: the raw model probability. It is logged and monitored, so the
+  drift monitor's reference distribution stays valid.
+- `pd`: the calibrated probability of default. The credit decision is made
+  on this — the 0.15/0.30 thresholds are probabilities of default — with a
+  fallback to the raw score only for pre-calibration models.
 - `scaled_score`: the integer scorecard score.
 
 `pd` and `scaled_score` are omitted (null) when the loaded model has no
@@ -138,10 +138,10 @@ calibrator. `/health` reports `calibrated: true|false`.
 | `pipeline/train_challenger.py` | Calibrates the challenger before export. |
 | `pipeline/reject_inference.py` | Deletes any stale calibrator so the exporter never pairs one with the wrong model. |
 | `pipeline/export_model_json.py` | Embeds calibration breakpoints + scorecard params in `model.json`. |
-| `go/internal/model/calibration.go` | New. `Calibration.Apply`, `Scorecard.Score`. |
-| `go/internal/model/model.go` | Optional `Calibration`/`Scorecard` fields, `Load` validation. |
-| `go/cmd/scoring-api/main.go` | `pd` and `scaled_score` in the response, `calibrated` in health. |
-| `tests/test_calibration.py`, `go/internal/model/calibration_test.go`, `model_test.go` | Unit + sklearn parity tests. |
+| `go/shared/model/calibration.go` | New. `Calibration.Apply`, `Scorecard.Score`. |
+| `go/shared/model/model.go` | Optional `Calibration`/`Scorecard` fields, `Load` validation. |
+| `go/inference/server.go` | `pd` and `scaled_score` in the response, `calibrated` in health. |
+| `tests/test_calibration.py`, `go/shared/model/calibration_test.go`, `model_test.go` | Unit + sklearn parity tests. |
 
 ---
 
@@ -163,9 +163,9 @@ client
 ```
 
 `instrument` is outermost so even a 401 or 429 gets a request ID, an
-access-log line, and a metrics increment. `/health` is instrumented but
-open. `/metrics` is served raw by `promhttp` so scrapes do not count
-themselves or generate log noise.
+access-log line, and a metrics increment. `/health` is instrumented and
+open (liveness/readiness). `/metrics` is instrumented and authenticated —
+scrapers present the key as a Bearer token (see Authentication).
 
 ### Authentication
 
@@ -174,14 +174,16 @@ variable (comma-separated). The comparison is constant time
 (`crypto/subtle.ConstantTimeCompare`) and does not short-circuit on the
 first match, so timing does not reveal which or how many keys exist.
 
-When `API_KEYS` is unset the middleware is a pass-through and the server
-logs a warning at startup. This keeps local development and the existing
-test suite working without configuration. If you want the API to refuse
-to start without keys, that is a one-line change in `main()`.
+The server fails closed: when `API_KEYS` is unset it refuses to start
+unless `ALLOW_UNAUTHENTICATED_DEV=true` is set explicitly for local
+development. A key may be presented as `X-API-Key` or as an
+`Authorization: Bearer <key>` header (the Bearer form lets Prometheus
+scrape `/metrics`).
 
-Authentication applies to `/score`, `/score/batch`, and `/reload`.
-`/health` and `/metrics` stay open so load balancers and Prometheus can
-reach them.
+Authentication applies to `/score`, `/score/batch`, `/reload`, and
+`/metrics` (the per-client rate limiter is skipped for `/metrics` so
+scrapes are not throttled). `/health` stays open so load balancers can
+reach it.
 
 ### Rate limiting
 
@@ -264,7 +266,9 @@ process exits non-zero instead of silently continuing.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `API_KEYS` | unset (auth off) | comma-separated accepted API keys |
+| `API_KEYS` | unset (required) | comma-separated accepted API keys; the server fails closed if unset |
+| `ALLOW_UNAUTHENTICATED_DEV` | unset (false) | allow startup with no `API_KEYS` (local development only) |
+| `ALLOW_UNAPPROVED_MODEL` | unset (false) | audited override to serve a non-APPROVED model card (SR 11-7) |
 | `RATE_LIMIT_RPS` | 20 | per-client sustained request rate |
 | `RATE_LIMIT_BURST` | 40 | per-client token-bucket depth |
 | `PORT` | 8000 | listen port |
@@ -275,11 +279,11 @@ process exits non-zero instead of silently continuing.
 
 | File | Change |
 |------|--------|
-| `go/cmd/scoring-api/middleware.go` | New. Instrument, auth, rate limiter, client identity. |
-| `go/cmd/scoring-api/metrics.go` | New. Prometheus metric definitions and helpers. |
-| `go/cmd/scoring-api/main.go` | Middleware wiring, `/metrics`, server timeouts, graceful shutdown. |
-| `go/internal/config/config.go` | `APIKeys()`, `RateLimitRPS()`, `RateLimitBurst()`. |
-| `go/cmd/scoring-api/middleware_test.go`, `metrics_test.go`, `config_test.go` | Unit tests. |
+| `go/inference/middleware.go` | New. Instrument, auth, rate limiter, client identity. |
+| `go/inference/metrics.go` | New. Prometheus metric definitions and helpers. |
+| `go/inference/server.go` | Middleware wiring, `/metrics`, server timeouts, graceful shutdown. |
+| `go/shared/config/config.go` | `APIKeys()`, `RateLimitRPS()`, `RateLimitBurst()`. |
+| `go/inference/middleware_test.go`, `metrics_test.go`, `config_test.go` | Unit tests. |
 | `docker-compose.yml` | Prometheus + Grafana under a `monitoring` profile. |
 | `monitoring/` | New. `prometheus.yml`, Grafana provisioning, dashboard JSON. |
 | `go/go.mod`, `go/go.sum` | New deps: `prometheus/client_golang`, `client_model`, `x/time`, `google/uuid` promoted to direct. |
@@ -312,10 +316,10 @@ API:
   counter, `setModelInfo` clears the previous version on reload.
 - `config_test.go`: `API_KEYS` parsing, rate-limit defaults and overrides.
 
-A runtime smoke test confirmed the assembled server: `/health` and
-`/metrics` open and serving (`scoring_api_model_info{version="v1.2"} 1`),
-401 without or with a wrong key, a clean allowed-then-429 transition
-under a burst-2 limit with `Retry-After: 1`, and a SIGTERM that logs
-draining and then a clean stop.
+A runtime smoke test confirmed the assembled server: `/health` open and
+serving, `/metrics` serving under authentication
+(`scoring_api_model_info{version="v1.2"} 1`), 401 without or with a wrong
+key, a clean allowed-then-429 transition under a burst-2 limit with
+`Retry-After: 1`, and a SIGTERM that logs draining and then a clean stop.
 
 `gofmt`, `go vet`, the full Go suite, and `ruff` are all green.

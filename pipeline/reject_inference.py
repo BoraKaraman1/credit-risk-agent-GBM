@@ -20,17 +20,17 @@ import mlflow.sklearn
 import lightgbm as lgb
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
-from pathlib import Path
 from datetime import datetime, timezone
 
+from pipeline import config
 from pipeline.train import _model_path
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-SILVER_DIR = DATA_DIR / "silver"
-GOLD_DIR = DATA_DIR / "gold"
-MODELS_DIR = DATA_DIR / "models"
+DATA_DIR = config.data_dir()
+SILVER_DIR = config.silver_dir()
+GOLD_DIR = config.gold_dir()
+MODELS_DIR = config.models_dir()
 
 # Reject inference config
 REJECT_SAMPLE_SIZE = 500_000      # cap rejected rows for memory

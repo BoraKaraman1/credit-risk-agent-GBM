@@ -12,6 +12,7 @@ Usage:
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -20,12 +21,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pipeline import config
 from pipeline.calibrate import scorecard_params
+from pipeline.model_card import _validation_status
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-MODELS_DIR = DATA_DIR / "models"
+DATA_DIR = config.data_dir()
+MODELS_DIR = config.models_dir()
 
 FORMAT_VERSION = 1
 
@@ -127,6 +130,20 @@ def export_model(model_dir):
         raise AssertionError("Exported trees do not reproduce LightGBM raw scores "
                              "up to a constant baseline.")
 
+    # Embed the model-card verdict so the serving governance gate can
+    # refuse a non-APPROVED champion without re-deriving it (single source
+    # of truth: model_card._validation_status over the same metadata).
+    status, rationale = _validation_status(meta)
+
+    # Carry the feature-store schema version (from the Gold feature
+    # contract) so serving can reject snapshots built under an
+    # incompatible feature schema.
+    feature_version = None
+    fm_path = config.gold_dir() / "feature_metadata.json"
+    if fm_path.exists():
+        with open(fm_path) as f:
+            feature_version = json.load(f).get("feature_version")
+
     payload = {
         "format_version": FORMAT_VERSION,
         "model_version": meta["version"],
@@ -135,7 +152,10 @@ def export_model(model_dir):
         "metrics": meta.get("metrics", {}),
         "baseline_prediction": baseline,
         "trees": trees,
+        "validation_status": {"status": status, "rationale": rationale},
     }
+    if feature_version is not None:
+        payload["feature_version"] = feature_version
 
     # Optional isotonic calibrator (pipeline/calibrate.py): exported as
     # breakpoints so the Go runtime interpolates without sklearn.
@@ -149,9 +169,15 @@ def export_model(model_dir):
         }
         payload["scorecard"] = scorecard_params()
 
+    # Atomic write: serialize to a temp file, fsync, then rename into
+    # place so a starting/reloading runtime never reads a partial model.
     out_path = model_dir / "model.json"
-    with open(out_path, "w") as f:
+    tmp_path = model_dir / "model.json.tmp"
+    with open(tmp_path, "w") as f:
         json.dump(payload, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, out_path)
 
     size_mb = out_path.stat().st_size / 1e6
     logger.info(

@@ -213,10 +213,15 @@ func runRetrain(ctx context.Context, reason string) (*retrainReport, error) {
 	challengerMetrics := evaluate(challengerScores, yTrue)
 
 	rep := &retrainReport{
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
-		Reason:         reason,
-		ActionRequired: "Human review required before promoting challenger to champion (SR 11-7).",
-		PromoteCommand: "cp -r data/models/challenger/. data/models/champion/",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Reason:    reason,
+		ActionRequired: "Human review required before promoting challenger to champion (SR 11-7); " +
+			"the challenger model card must be APPROVED (see docs/model_card.md) or the serving " +
+			"gate will refuse it.",
+		// `gbm promote` publishes the challenger as an immutable versioned
+		// directory and atomically repoints the champion symlink at it, so
+		// the serving runtime never observes a missing or partial champion.
+		PromoteCommand: "gbm promote",
 	}
 	rep.Challenger.Version = version
 	rep.Challenger.TestMetrics = challengerMetrics
@@ -340,5 +345,8 @@ func RunRetrain(reason string) {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(rep)
+	if err := enc.Encode(rep); err != nil {
+		slog.Error("failed to encode retrain report", "error", err)
+		os.Exit(1)
+	}
 }

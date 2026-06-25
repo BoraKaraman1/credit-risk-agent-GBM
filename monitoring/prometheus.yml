@@ -5,5 +5,10 @@ global:
 scrape_configs:
   - job_name: scoring-api
     metrics_path: /metrics
+    # /metrics requires authentication. The credential must match one of
+    # the API_KEYS configured for the api service (demo default below).
+    authorization:
+      type: Bearer
+      credentials: demo-local-key
     static_configs:
       - targets: ["api:8000"]

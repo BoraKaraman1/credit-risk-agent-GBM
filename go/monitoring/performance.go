@@ -50,7 +50,7 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		if d, err := db.Connect(ctx, config.DatabaseURL()); err == nil {
 			database = d
 			defer d.Close()
-			scores, labels, err := d.ScoredOutcomes(ctx, 100000)
+			scores, labels, err := d.ScoredOutcomes(ctx, m.Version, 100000)
 			if err != nil {
 				slog.Warn("could not read scoring_log", "error", err)
 			} else if len(scores) >= 100 {
@@ -80,6 +80,25 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		slog.Info("using test set as production proxy")
 	}
 
+	// AUC/KS are undefined without both outcome classes, and a NaN metric
+	// would break JSON encoding downstream. Report an explicit status
+	// instead of emitting NaN/Inf for an early or degenerate cohort.
+	if !bothClasses(yTrue) {
+		slog.Warn("insufficient outcomes for performance metrics", "n_observations", len(yTrue))
+		return &performanceReport{
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			ModelVersion:    m.Version,
+			OutcomesSource:  outcomesSource,
+			NObservations:   len(yTrue),
+			CurrentMetrics:  map[string]float64{},
+			TrainingMetrics: m.Metrics,
+			AUCDropThresh:   config.AUCDropThreshold,
+			DecileAnalysis:  []metrics.Decile{},
+			Recommendation: "INSUFFICIENT OUTCOMES. Both default and non-default outcomes " +
+				"are required to compute AUC/KS; skipping this cohort.",
+		}, nil
+	}
+
 	currentAUC := metrics.ROCAUC(yTrue, yScore)
 	currentKS := metrics.KS(yTrue, yScore)
 	currentMetrics := map[string]float64{
@@ -88,12 +107,13 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		"gini": round(2*currentAUC-1, 4),
 	}
 
-	// Compare to training metrics (val preferred, test as fallback)
+	// Compare against the cleanest generalization estimate: the temporal
+	// test holdout (test is never used for fitting or early stopping).
 	trainAUC := 0.0
-	if val, ok := m.Metrics["val"]; ok {
-		trainAUC = val["auc"]
-	} else if test, ok := m.Metrics["test"]; ok {
+	if test, ok := m.Metrics["test"]; ok {
 		trainAUC = test["auc"]
+	} else if val, ok := m.Metrics["val"]; ok {
+		trainAUC = val["auc"]
 	}
 	aucDrop := trainAUC - currentAUC
 
@@ -129,6 +149,23 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 	return rep, nil
 }
 
+// bothClasses reports whether the outcome labels contain at least one
+// default and one non-default, the precondition for AUC and KS.
+func bothClasses(yTrue []int) bool {
+	var pos, neg bool
+	for _, y := range yTrue {
+		if y == 1 {
+			pos = true
+		} else {
+			neg = true
+		}
+		if pos && neg {
+			return true
+		}
+	}
+	return false
+}
+
 func performanceRecommendation(aucDrop float64, rankBreaks int, current map[string]float64) string {
 	if aucDrop > config.AUCDropThreshold {
 		return fmt.Sprintf(
@@ -155,5 +192,8 @@ func RunPerformance() {
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(rep)
+	if err := enc.Encode(rep); err != nil {
+		slog.Error("failed to encode performance report", "error", err)
+		os.Exit(1)
+	}
 }
