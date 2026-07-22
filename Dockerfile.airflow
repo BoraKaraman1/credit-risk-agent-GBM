@@ -28,9 +28,11 @@ ENV PYTHONPATH=/opt/airflow \
 # the pinned apache/airflow base. (Reconciling these against Airflow's own
 # constraints file requires moving to an Airflow release compatible with
 # great-expectations >= 1.0; tracked as a follow-up.)
-COPY requirements/base.txt requirements/pipeline.txt requirements/constraints.txt /tmp/requirements/
-RUN pip install --no-cache-dir -c /tmp/requirements/constraints.txt -r /tmp/requirements/pipeline.txt
+COPY requirements/base.txt requirements/pipeline.txt requirements/agent.txt requirements/constraints.txt /tmp/requirements/
+RUN pip install --no-cache-dir -c /tmp/requirements/constraints.txt \
+    -r /tmp/requirements/pipeline.txt -r /tmp/requirements/agent.txt
 
 COPY --chown=airflow:0 dags/ /opt/airflow/dags/
 COPY --chown=airflow:0 pipeline/ /opt/airflow/pipeline/
+COPY --chown=airflow:0 agents/ /opt/airflow/agents/
 COPY --from=gobuild --chown=airflow:0 /out/ /opt/airflow/bin/

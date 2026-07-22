@@ -29,14 +29,6 @@ GOLD_DIR = config.gold_dir()
 MODELS_DIR = config.models_dir()
 
 
-def _model_path(directory):
-    """Resolve model path with backward compat (joblib first, then pkl fallback)."""
-    p = directory / "model.joblib"
-    if p.exists():
-        return p
-    return directory / "model.pkl"
-
-
 def compute_ks(y_true, y_score):
     """Kolmogorov-Smirnov statistic."""
     fpr, tpr, _ = roc_curve(y_true, y_score)
@@ -109,12 +101,17 @@ def train_model(X_train, y_train, X_val, y_val, params=None):
 
     logger.info(f"Best iteration: {model.best_iteration_}")
 
-    return model, params
+    # Return the carve-out too: evaluation and calibration reuse it, and
+    # returning it makes "same split as training" structural rather than
+    # relying on a deterministic re-split.
+    return model, params, X_es, y_es
 
 
-def evaluate_model(model, X, y, split_name="test"):
-    """Compute AUC, KS, Gini for a given split."""
-    y_score = model.predict_proba(X)[:, 1]
+def evaluate_model(model, X, y, split_name="test", y_score=None):
+    """Compute AUC, KS, Gini for a given split. Pass y_score to reuse
+    already-computed predictions instead of re-scoring X."""
+    if y_score is None:
+        y_score = model.predict_proba(X)[:, 1]
 
     auc = roc_auc_score(y, y_score)
     ks = compute_ks(y, y_score)
@@ -158,7 +155,7 @@ def run(as_challenger=False):
 
     with mlflow.start_run():
         logger.info("Training LightGBM ...")
-        model, params = train_model(X_train, y_train, X_val, y_val)
+        model, params, X_es, y_es = train_model(X_train, y_train, X_val, y_val)
 
         # Log params (convert non-string values for MLflow)
         log_params = {k: str(v) for k, v in params.items()}
@@ -173,10 +170,12 @@ def run(as_challenger=False):
         # early-stopping carve-out (never gradient-fitted) is the honest
         # non-test estimate; test is the clean temporal holdout that the
         # monitors baseline against. The same carve-out fits the calibrator.
-        _, X_es, _, y_es = early_stopping_split(X_train, y_train, X_val, y_val)
+        # Test scores are computed once and reused by evaluation,
+        # calibration, and fairness below.
+        test_scores = model.predict_proba(X_test)[:, 1]
         train_metrics = evaluate_model(model, X_train, y_train, "train")
         early_stopping_metrics = evaluate_model(model, X_es, y_es, "early_stopping")
-        test_metrics = evaluate_model(model, X_test, y_test, "test")
+        test_metrics = evaluate_model(model, X_test, y_test, "test", y_score=test_scores)
 
         # Log metrics
         for split, metrics in [
@@ -191,7 +190,7 @@ def run(as_challenger=False):
         mlflow.sklearn.log_model(model, "model")
 
         # Determine version
-        champion_meta = MODELS_DIR / "champion" / "model_metadata.json"
+        champion_meta = config.metadata_path(config.champion_dir())
         if champion_meta.exists():
             with open(champion_meta) as f:
                 prev = json.load(f)
@@ -202,7 +201,7 @@ def run(as_challenger=False):
             version = "v1.0"
 
         # Save as challenger or champion
-        dest = MODELS_DIR / ("challenger" if as_challenger else "champion")
+        dest = config.challenger_dir() if as_challenger else config.champion_dir()
 
         all_metrics = {
             "train": train_metrics,
@@ -215,7 +214,8 @@ def run(as_challenger=False):
 
         # Calibrate on the early-stopping carve-out (never gradient-fitted)
         logger.info("Fitting isotonic calibrator ...")
-        calibrator, cal_report = calibrate.calibrate_model(model, X_es, y_es, X_test, y_test)
+        calibrator, cal_report = calibrate.calibrate_model(
+            model, X_es, y_es, X_test, y_test, raw_test=test_scores)
         calibrate.save_calibration(dest, calibrator, cal_report)
         mlflow.log_metric("test_brier_raw", cal_report["brier_raw"])
         mlflow.log_metric("test_brier_calibrated", cal_report["brier_calibrated"])
@@ -224,7 +224,8 @@ def run(as_challenger=False):
         # Decisions use the calibrated PD so the analysis matches serving.
         logger.info("Running fairness analysis ...")
         fair_summary = fairness.summarize(
-            fairness.run(model=model, X_test=X_test, y_test=y_test, calibrator=calibrator))
+            fairness.run(model=model, X_test=X_test, y_test=y_test,
+                         calibrator=calibrator, raw_score=test_scores))
         fairness.save_fairness(dest, fair_summary)
 
     # Validation report (champion only): a markdown model card for MRM.

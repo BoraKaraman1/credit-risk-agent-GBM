@@ -39,6 +39,26 @@ def models_dir() -> Path:
     return Path(override) if override else data_dir() / "models"
 
 
+def champion_dir() -> Path:
+    return models_dir() / "champion"
+
+
+def challenger_dir() -> Path:
+    return models_dir() / "challenger"
+
+
+def model_path(directory) -> Path:
+    """Resolve a saved model with backward compat (joblib first, then pkl)."""
+    p = Path(directory) / "model.joblib"
+    if p.exists():
+        return p
+    return Path(directory) / "model.pkl"
+
+
+def metadata_path(directory) -> Path:
+    return Path(directory) / "model_metadata.json"
+
+
 def strict_data_quality() -> bool:
     """When true, data-quality validation failures abort the pipeline
     instead of only logging a warning. Off by default for local

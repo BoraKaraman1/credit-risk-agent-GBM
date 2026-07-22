@@ -186,7 +186,7 @@ def generate(model_dir=None, output_path=None):
     model_dir = Path(model_dir) if model_dir else MODELS_DIR / "champion"
     output_path = Path(output_path) if output_path else DEFAULT_OUTPUT
 
-    with open(model_dir / "model_metadata.json") as f:
+    with open(config.metadata_path(model_dir)) as f:
         meta = json.load(f)
     with open(GOLD_DIR / "feature_metadata.json") as f:
         feature_meta = json.load(f)

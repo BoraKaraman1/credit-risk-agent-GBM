@@ -50,6 +50,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 | Interpretability | TreeSHAP (adverse action reasons): Python `shap` for analysis, pure-Go implementation at serving time |
 | Fairness | Disparate Impact, Equal Opportunity, Statistical Parity |
 | Monitoring | Go agents (PSI, CSI, AUC tracking) |
+| Model risk review | Claude (Anthropic SDK) writing advisory review memos; all gates stay deterministic |
 
 ## Project Structure
 
@@ -75,6 +76,8 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 │       ├── metrics/              # PSI, CSI, AUC, KS, decile analysis
 │       ├── gold/                 # Gold parquet reader
 │       └── config/               # Shared thresholds and paths
+├── agents/
+│   └── review_agent.py           # LLM model-risk review memo (advisory; optional)
 ├── backup_python/                # Superseded Python services (reference only)
 ├── dags/
 │   ├── credit_risk_pipeline.py   # Monthly pipeline DAG
@@ -93,6 +96,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 │   ├── base.txt                  # Core ML libraries (shared)
 │   ├── pipeline.txt              # Batch training/sync jobs
 │   ├── airflow.txt               # Airflow runtime
+│   ├── agent.txt                 # Optional LLM review agent (anthropic SDK)
 │   ├── test.txt                  # Test runner
 │   ├── dev.txt                   # Full local development install
 │   └── constraints.txt           # Pinned versions for reproducible installs
@@ -317,6 +321,25 @@ The outcome backfill closes the monitoring loop. The scoring API cannot know an 
 | Feature CSI | — | > 0.20 → investigate |
 | AUC drop | — | > 0.03 → retrain |
 
+### LLM-Assisted Model Risk Review
+
+The original V1 design had Claude orchestrating the monitors; V2 replaced that with the deterministic Go loop above, because retrain triggers and promotion gates in a credit model need to be reproducible and auditable. The LLM now sits one level up, where an analyst would: `agents/review_agent.py` reads the weekly monitoring output and writes the review memo a human model-risk reviewer would otherwise assemble by hand.
+
+The division of labor is strict: **the agent advises, deterministic code decides.** PSI/AUC thresholds trigger retraining, the champion-relative fairness gate blocks promotion, and promotion stays human-approved (SR 11-7). The agent summarizes the run, flags trends heading toward thresholds, and drafts follow-ups; it decides nothing, and the loop runs unchanged without it.
+
+It is built on the Anthropic SDK's tool runner with read-only tools: the drift and performance monitors (`gbm drift`, `gbm performance`), the model card, and champion/challenger metadata. It cannot write to the database, touch model directories, or call `gbm promote`.
+
+```bash
+pip install -r requirements/agent.txt
+
+# Standalone: runs the monitors itself, writes docs/monitoring_review.md
+ANTHROPIC_API_KEY=... python agents/review_agent.py
+```
+
+In the weekly monitoring DAG it runs as the final `llm_review` task, fed the drift/performance/retrain reports from XCom. The task is optional by design: a missing `anthropic` install or API key logs a warning and the run still succeeds.
+
+Governance controls: the model ID is pinned via `REVIEW_AGENT_MODEL` (default `claude-opus-4-8`), the memo opens with an advisory disclaimer, and every run appends a full audit record (inputs, memo, token usage) to `data/review_agent_audit.jsonl`.
+
 ### Prometheus + Grafana
 
 The API exposes Prometheus metrics at `/metrics`: request counts and latency histograms per endpoint, the predicted-PD distribution, decision counts (approve/review/decline), and the loaded model version as a labeled info gauge. A compose profile brings up Prometheus and a pre-provisioned Grafana dashboard:
@@ -353,14 +376,15 @@ Reject inference is disabled by default. Enable via DAG config:
 Monitors model health and triggers retraining when needed:
 
 ```
-[drift_monitor, performance_monitor] (parallel) → decide_retrain → [retrain | skip]
+outcome_backfill → performance_monitor ┐
+                   drift_monitor       ┴→ decide_retrain → [retrain | skip] → llm_review
 ```
 
 Retraining triggers automatically when:
 - PSI status is CRITICAL (score distribution shift)
 - AUC drop exceeds the configured threshold (0.03)
 
-The monitor tasks shell out to the Go binaries, parse their JSON reports, and route them through XCom; the retrain reason is passed via XCom so the orchestrator logs why it was triggered.
+The monitor tasks shell out to the Go binaries, parse their JSON reports, and route them through XCom; the retrain reason is passed via XCom so the orchestrator logs why it was triggered. The closing `llm_review` task writes the advisory memo described above and never blocks the loop.
 
 ## Fairness Analysis
 

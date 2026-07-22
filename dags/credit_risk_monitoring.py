@@ -1,10 +1,12 @@
 """
 Airflow DAG: Credit Risk Monitoring
 Weekly monitoring: outcome backfill + drift check + performance check →
-conditional retrain. The backfill matures scored outcomes first so the
-performance monitor reads real labels; drift runs in parallel (it uses
-scores, not outcomes). A branching decision then determines whether to
-trigger the retrain orchestrator.
+conditional retrain → LLM review memo. The backfill matures scored
+outcomes first so the performance monitor reads real labels; drift runs
+in parallel (it uses scores, not outcomes). A branching decision then
+determines whether to trigger the retrain orchestrator. Finally the
+optional review agent summarizes the run for the human reviewer; it is
+advisory and never blocks or changes the loop.
 
 The monitors are gbm subcommands (see go/) that print a JSON report to
 stdout; this DAG shells out to them and routes the reports via XCom.
@@ -19,6 +21,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,28 @@ def _run_retrain(**kwargs):
     return report
 
 
+def _run_llm_review(**kwargs):
+    """Write the advisory review memo for this run (agents/review_agent.py).
+    Optional by design: a missing anthropic install or API key logs a
+    warning and the task succeeds, so the deterministic loop never
+    depends on the LLM."""
+    ti = kwargs["ti"]
+    reports = {
+        "drift": ti.xcom_pull(task_ids="drift_monitor", key="drift_report"),
+        "performance": ti.xcom_pull(task_ids="performance_monitor", key="perf_report"),
+        "retrain": ti.xcom_pull(task_ids="retrain"),
+    }
+    try:
+        from agents.review_agent import run as run_review
+
+        memo = run_review(reports=reports)
+        logger.info("LLM review memo written to docs/monitoring_review.md")
+        return memo
+    except Exception as e:
+        logger.warning("LLM review skipped: %s", e)
+        return None
+
+
 with DAG(
     dag_id="credit_risk_monitoring",
     default_args=default_args,
@@ -114,9 +139,16 @@ with DAG(
     decide = BranchPythonOperator(task_id="decide_retrain", python_callable=_decide_retrain)
     retrain = PythonOperator(task_id="retrain", python_callable=_run_retrain)
     skip = EmptyOperator(task_id="skip_retrain")
+    review = PythonOperator(
+        task_id="llm_review",
+        python_callable=_run_llm_review,
+        # Runs after whichever branch executed (the other is skipped).
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    )
 
     # Backfill matures outcomes before the performance monitor reads them;
     # drift runs in parallel (it uses scores, not outcomes). Then decide
-    # whether to retrain.
+    # whether to retrain, and close the run with the advisory LLM memo.
     backfill >> perf
     [drift, perf] >> decide >> [retrain, skip]
+    [retrain, skip] >> review

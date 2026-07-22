@@ -1,0 +1,3 @@
+# Optional: LLM model-risk review agent (agents/review_agent.py).
+# The monitoring loop runs fine without this install.
+anthropic>=0.66

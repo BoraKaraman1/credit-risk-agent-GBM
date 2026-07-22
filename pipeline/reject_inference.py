@@ -23,7 +23,6 @@ from sklearn.model_selection import train_test_split
 from datetime import datetime, timezone
 
 from pipeline import config
-from pipeline.train import _model_path
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ def load_data():
 
     rejected = pd.read_parquet(SILVER_DIR / "rejected_clean.parquet")
 
-    champion_path = _model_path(MODELS_DIR / "champion")
+    champion_path = config.model_path(config.champion_dir())
     if not champion_path.exists():
         raise FileNotFoundError("No champion model found. Run train.py first.")
     champion_model = joblib.load(champion_path)
@@ -217,7 +216,7 @@ def compare_models(champion, augmented, X_test, y_test, feature_cols):
 
 def save_augmented_model(model, feature_cols, metrics, comparison):
     """Save augmented model as challenger with reject inference metadata."""
-    dest = MODELS_DIR / "challenger"
+    dest = config.challenger_dir()
     dest.mkdir(parents=True, exist_ok=True)
 
     joblib.dump(model, dest / "model.joblib")
@@ -228,7 +227,7 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
     (dest / "calibrator.joblib").unlink(missing_ok=True)
 
     # Determine version
-    champion_meta_path = MODELS_DIR / "champion" / "model_metadata.json"
+    champion_meta_path = config.metadata_path(config.champion_dir())
     if champion_meta_path.exists():
         with open(champion_meta_path) as f:
             prev = json.load(f)
@@ -254,7 +253,7 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
         "comparison_vs_champion": comparison,
     }
 
-    with open(dest / "model_metadata.json", "w") as f:
+    with open(config.metadata_path(dest), "w") as f:
         json.dump(meta, f, indent=2)
 
     logger.info(f"Augmented model saved as challenger {version} at {dest}")

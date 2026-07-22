@@ -27,8 +27,6 @@ from pipeline import config
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = config.data_dir()
-MODELS_DIR = config.models_dir()
 
 # Scorecard anchors: a score of 600 corresponds to 30:1 good:bad odds,
 # and every 20 points doubles the odds (PDO).
@@ -97,12 +95,14 @@ def reliability_table(y, proba, n_bins=10):
     return table
 
 
-def calibrate_model(model, X_cal, y_cal, X_test, y_test):
-    """Fit the calibrator on held-out data and evaluate on test."""
+def calibrate_model(model, X_cal, y_cal, X_test, y_test, raw_test=None):
+    """Fit the calibrator on held-out data and evaluate on test. Pass
+    raw_test to reuse already-computed test scores instead of re-scoring."""
     raw_cal = model.predict_proba(X_cal)[:, 1]
     calibrator = fit_calibrator(raw_cal, y_cal)
 
-    raw_test = model.predict_proba(X_test)[:, 1]
+    if raw_test is None:
+        raw_test = model.predict_proba(X_test)[:, 1]
     cal_test = calibrator.predict(raw_test)
 
     report = {
@@ -141,10 +141,10 @@ def save_calibration(dest_dir, calibrator, report):
 def run(model_dir=None):
     """Calibrate an already-trained model without retraining."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from pipeline.train import _model_path, early_stopping_split, load_gold_data
+    from pipeline.train import early_stopping_split, load_gold_data
 
-    model_dir = Path(model_dir) if model_dir else MODELS_DIR / "champion"
-    model = joblib.load(_model_path(model_dir))
+    model_dir = Path(model_dir) if model_dir else config.champion_dir()
+    model = joblib.load(config.model_path(model_dir))
 
     X_train, y_train, X_val, y_val, X_test, y_test, _ = load_gold_data()
     _, X_es, _, y_es = early_stopping_split(X_train, y_train, X_val, y_val)
@@ -160,5 +160,5 @@ if __name__ == "__main__":
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    target = sys.argv[1] if len(sys.argv) > 1 else MODELS_DIR / "champion"
+    target = sys.argv[1] if len(sys.argv) > 1 else config.champion_dir()
     run(target)

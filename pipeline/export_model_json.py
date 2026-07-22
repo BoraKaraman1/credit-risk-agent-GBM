@@ -27,18 +27,7 @@ from pipeline.model_card import _validation_status
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = config.data_dir()
-MODELS_DIR = config.models_dir()
-
 FORMAT_VERSION = 1
-
-
-def _model_path(directory):
-    """Resolve model path with backward compat."""
-    p = directory / "model.joblib"
-    if p.exists():
-        return p
-    return directory / "model.pkl"
 
 
 def export_tree(tree_structure):
@@ -101,8 +90,8 @@ def _leaf_value_for_row(tree, row):
 
 def export_model(model_dir):
     model_dir = Path(model_dir)
-    model = joblib.load(_model_path(model_dir))
-    with open(model_dir / "model_metadata.json") as f:
+    model = joblib.load(config.model_path(model_dir))
+    with open(config.metadata_path(model_dir)) as f:
         meta = json.load(f)
 
     booster = model.booster_
@@ -193,5 +182,5 @@ if __name__ == "__main__":
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    target = sys.argv[1] if len(sys.argv) > 1 else MODELS_DIR / "champion"
+    target = sys.argv[1] if len(sys.argv) > 1 else config.champion_dir()
     export_model(target)

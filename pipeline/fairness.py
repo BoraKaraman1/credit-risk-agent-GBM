@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = config.data_dir()
 GOLD_DIR = config.gold_dir()
-MODELS_DIR = config.models_dir()
 
 # Decision thresholds (mirrored from API)
 APPROVE_THRESHOLD = 0.15
@@ -58,14 +57,6 @@ PROTECTED_ATTRIBUTES = {
         "description": "Employment Length Reporting",
     },
 }
-
-
-def _model_path(directory):
-    """Resolve model path with backward compat."""
-    p = directory / "model.joblib"
-    if p.exists():
-        return p
-    return directory / "model.pkl"
 
 
 def _reverse_maps_from_metadata(encodings: dict) -> dict:
@@ -214,7 +205,7 @@ def analyze_attribute(y_true: np.ndarray, y_score: np.ndarray,
     }
 
 
-def run(model=None, X_test=None, y_test=None, calibrator=None) -> dict:
+def run(model=None, X_test=None, y_test=None, calibrator=None, raw_score=None) -> dict:
     """
     Run fairness analysis across all protected attributes.
     If model/X_test/y_test not provided, loads from disk (including the
@@ -227,11 +218,10 @@ def run(model=None, X_test=None, y_test=None, calibrator=None) -> dict:
         feature_cols = meta["feature_columns"]
         reverse_overrides = _reverse_maps_from_metadata(meta.get("categorical_encodings", {}))
 
-        model_path = _model_path(MODELS_DIR / "champion")
-        model = joblib.load(model_path)
+        model = joblib.load(config.model_path(config.champion_dir()))
 
         if calibrator is None:
-            cal_path = MODELS_DIR / "champion" / "calibrator.joblib"
+            cal_path = config.champion_dir() / "calibrator.joblib"
             if cal_path.exists():
                 calibrator = joblib.load(cal_path)
 
@@ -244,7 +234,8 @@ def run(model=None, X_test=None, y_test=None, calibrator=None) -> dict:
     # Decisions use the calibrated PD to match the serving API (the
     # 0.15/0.30 thresholds are probabilities of default). Calibration is
     # monotonic, so discrimination metrics (AUC) are unchanged.
-    raw_score = model.predict_proba(X_test)[:, 1]
+    if raw_score is None:
+        raw_score = model.predict_proba(X_test)[:, 1]
     y_score = calibrator.predict(raw_score) if calibrator is not None else raw_score
     y_true = np.asarray(y_test)
 
@@ -318,7 +309,7 @@ def summarize(report: dict) -> dict:
 
 def save_fairness(model_dir, summary: dict) -> None:
     """Record the fairness summary in the model's model_metadata.json."""
-    meta_path = Path(model_dir) / "model_metadata.json"
+    meta_path = config.metadata_path(model_dir)
     with open(meta_path) as f:
         meta = json.load(f)
     meta["fairness"] = summary
