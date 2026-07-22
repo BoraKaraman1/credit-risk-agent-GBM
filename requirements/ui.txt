@@ -1,0 +1,7 @@
+# Streamlit front end (ui/): scoring page + monitoring dashboard.
+streamlit>=1.37
+altair>=5.0
+pandas>=2.0
+requests>=2.31
+SQLAlchemy>=1.4
+psycopg2-binary>=2.9

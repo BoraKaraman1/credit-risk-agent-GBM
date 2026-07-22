@@ -1,0 +1,109 @@
+"""
+Pure helpers for the Streamlit UI: shaping drift_log rows and API
+responses into DataFrames and presentation dicts. No streamlit imports,
+so everything here is unit-testable with plain pandas.
+"""
+
+import pandas as pd
+
+# Chart colors. Marks use one categorical hue (every chart here is a
+# single series); status colors annotate thresholds and always appear
+# with a text label, never as the only carrier of meaning.
+SERIES = "#2a78d6"
+STATUS = {
+    "good": "#0ca30c",
+    "warning": "#fab219",
+    "serious": "#ec835a",
+    "critical": "#d03b3b",
+}
+TEXT_SECONDARY = "#52514e"
+
+# Monitor thresholds, mirrored from go/shared/config (the monitors are
+# the source of truth; the UI only annotates charts with them).
+PSI_WARNING = 0.10
+PSI_CRITICAL = 0.25
+AUC_DROP_THRESHOLD = 0.03
+
+DECISION_PRESENTATION = {
+    "approve": {"label": "Approve", "icon": "✅", "status": "good"},
+    "review": {"label": "Manual review", "icon": "⚠️", "status": "warning"},
+    "decline": {"label": "Decline", "icon": "⛔", "status": "critical"},
+}
+
+
+def decision_presentation(decision: str) -> dict:
+    """Label/icon/status for a decision band; unknown values pass through."""
+    return DECISION_PRESENTATION.get(
+        decision, {"label": decision, "icon": "❔", "status": "warning"}
+    )
+
+
+def psi_status(psi: float) -> str:
+    if psi > PSI_CRITICAL:
+        return "CRITICAL"
+    if psi > PSI_WARNING:
+        return "WARNING"
+    return "OK"
+
+
+def metric_history_frame(rows) -> pd.DataFrame:
+    """Shape drift_log rows (measured_at, metric_value, model_version,
+    details) into a chart-ready frame; empty input yields empty frame."""
+    df = pd.DataFrame(rows, columns=["measured_at", "metric_value", "model_version", "details"])
+    if df.empty:
+        return df
+    df["measured_at"] = pd.to_datetime(df["measured_at"])
+    return df.sort_values("measured_at").reset_index(drop=True)
+
+
+def csi_frame(details: dict) -> pd.DataFrame:
+    """Per-feature CSI from a psi row's details, highest first."""
+    csi = (details or {}).get("csi") or {}
+    df = pd.DataFrame(
+        [{"feature": k, "csi": v} for k, v in csi.items()],
+        columns=["feature", "csi"],
+    )
+    return df.sort_values("csi", ascending=False).reset_index(drop=True)
+
+
+def decile_frame(details: dict) -> pd.DataFrame:
+    """Decile analysis from an auc row's details (decile, count,
+    default_rate, avg_score)."""
+    deciles = (details or {}).get("decile_analysis") or []
+    return pd.DataFrame(deciles, columns=["decile", "count", "default_rate", "avg_score"])
+
+
+def fairness_frame(details: dict) -> pd.DataFrame:
+    """Flatten a fairness summary (drift_log details) into one row per
+    attribute/group with DIR, EOD, SPD, rates, and violation flags."""
+    rows = []
+    for attr, a in (details or {}).get("attributes", {}).items():
+        violations = set(a.get("violations", []))
+        for group, g in a.get("groups", {}).items():
+            rows.append({
+                "attribute": a.get("description", attr),
+                "group": group,
+                "privileged": group == a.get("privileged_group"),
+                "dir": g.get("dir"),
+                "eod": g.get("eod"),
+                "spd": g.get("spd"),
+                "approval_rate": g.get("approval_rate"),
+                "default_rate": g.get("default_rate"),
+                "violation": group in violations,
+            })
+    return pd.DataFrame(rows, columns=[
+        "attribute", "group", "privileged", "dir", "eod", "spd",
+        "approval_rate", "default_rate", "violation",
+    ])
+
+
+def adverse_actions_frame(actions) -> pd.DataFrame:
+    """Adverse actions from a /score response, one row per reason."""
+    rows = [{
+        "code": a.get("code"),
+        "reason": a.get("reason"),
+        "feature": a.get("feature_name"),
+        "shap": a.get("shap_value"),
+        "value": a.get("feature_value"),
+    } for a in (actions or [])]
+    return pd.DataFrame(rows, columns=["code", "reason", "feature", "shap", "value"])
