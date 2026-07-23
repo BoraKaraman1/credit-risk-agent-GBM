@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config, io_utils
 from pipeline.calibrate import scorecard_params
-from pipeline.model_card import _validation_status
+from pipeline.model_card import _validation_status, champion_fairness_for
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,10 @@ def export_model(model_dir):
     # Embed the model-card verdict so the serving governance gate can
     # refuse a non-APPROVED champion without re-deriving it (single source
     # of truth: model_card._validation_status over the same metadata).
-    status, rationale = _validation_status(meta)
+    # Challenger exports are judged champion-relative, the same rule as
+    # the retrain gate, keyed strictly on the target being the
+    # challenger dir so a champion can never self-compare to APPROVED.
+    status, rationale = _validation_status(meta, champion_fairness_for(model_dir))
 
     # Carry the feature-store schema version (from the Gold feature
     # contract) so serving can reject snapshots built under an

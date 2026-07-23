@@ -24,11 +24,6 @@ import (
 	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/shared/model"
 )
 
-// A challenger may worsen an already-violating group by up to this much
-// before the gate treats it as a regression (guards against retrain
-// noise in the DIR estimate).
-const fairnessWorsenTolerance = 0.01
-
 type testMetrics struct {
 	AUC  float64 `json:"auc"`
 	KS   float64 `json:"ks"`
@@ -85,13 +80,16 @@ type retrainReport struct {
 
 // fairnessGate applies the champion-relative four-fifths rule: a
 // challenger is blocked only if it introduces a new DIR violation or
-// worsens one the champion already had. A group the champion already
-// fails, left no worse, does not block (the dataset's inherent disparity
-// should not make every challenger unpromotable). Returns the blocking
-// reasons, sorted for deterministic output.
+// worsens one the champion already had by more than the contract's
+// dir_worsen_tolerance (retrain noise in the DIR estimate). A group the
+// champion already fails, left no worse, does not block (the dataset's
+// inherent disparity should not make every challenger unpromotable).
+// A missing challenger summary fails closed: the gate exists to catch
+// exactly the runs where the fairness analysis went missing. Returns
+// the blocking reasons, sorted for deterministic output.
 func fairnessGate(champ, chal *fairnessSummary) (bool, []string) {
 	if chal == nil {
-		return false, nil
+		return true, []string{"challenger fairness summary missing from training result"}
 	}
 	thr := chal.DIRThreshold
 	if thr <= 0 {
@@ -115,7 +113,7 @@ func fairnessGate(champ, chal *fairnessSummary) (bool, []string) {
 			case !had || champDIR >= thr:
 				reasons = append(reasons, fmt.Sprintf(
 					"%s/%s introduces a DIR violation (%.2f < %.2f)", attr, group, g.DIR, thr))
-			case g.DIR < champDIR-fairnessWorsenTolerance:
+			case g.DIR < champDIR-config.FairnessWorsenTolerance:
 				reasons = append(reasons, fmt.Sprintf(
 					"%s/%s worsens an existing DIR violation (champion %.2f -> challenger %.2f)",
 					attr, group, champDIR, g.DIR))
@@ -190,6 +188,17 @@ func runRetrain(ctx context.Context, reason string) (*retrainReport, error) {
 	var trained trainResult
 	if err := json.Unmarshal(out, &trained); err != nil {
 		return nil, fmt.Errorf("parse training result: %w (output: %.200s)", err, out)
+	}
+	// The training result is a trust boundary like any request body:
+	// required fields must be present or the run fails, so a renamed
+	// key can never silently disarm the fairness gate downstream.
+	// champion_fairness is legitimately null at bootstrap.
+	if trained.Version == "" || trained.Fairness == nil {
+		return nil, fmt.Errorf("training result missing required fields "+
+			"(version=%q, fairness present=%t)", trained.Version, trained.Fairness != nil)
+	}
+	if (trained.TestMetrics == testMetrics{}) {
+		return nil, fmt.Errorf("training result missing test_metrics")
 	}
 	slog.Info("challenger trained", "iterations", trained.NIterations)
 

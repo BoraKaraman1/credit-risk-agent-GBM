@@ -29,6 +29,7 @@ PSI_CRITICAL = _CONTRACT["monitoring"]["psi_critical"]
 CSI_THRESHOLD = _CONTRACT["monitoring"]["csi_threshold"]
 AUC_DROP_THRESHOLD = _CONTRACT["monitoring"]["auc_drop_threshold"]
 DIR_THRESHOLD = _CONTRACT["fairness"]["dir_threshold"]
+DIR_WORSEN_TOLERANCE = _CONTRACT["fairness"]["dir_worsen_tolerance"]
 
 
 def data_dir() -> Path:

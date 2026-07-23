@@ -39,7 +39,11 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		return nil, err
 	}
 
-	// Try Supabase for real outcomes; fall back to the test set.
+	// Supabase for real outcomes; test-set fallback only when no
+	// database is configured or too few outcomes have matured. A
+	// configured database that cannot be reached or read fails the run
+	// (fail closed): a silent proxy fallback would keep reporting the
+	// baseline AUC through a monitoring-datasource outage.
 	outcomesSource := "test_set_proxy"
 	var (
 		yTrue    []int
@@ -47,19 +51,20 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		database *db.DB
 	)
 	if config.DatabaseURL() != "" {
-		if d, err := db.Connect(ctx, config.DatabaseURL()); err == nil {
-			database = d
-			defer d.Close()
-			scores, labels, err := d.ScoredOutcomes(ctx, m.Version, 100000)
-			if err != nil {
-				slog.Warn("could not read scoring_log", "error", err)
-			} else if len(scores) >= 100 {
-				yScore, yTrue = scores, labels
-				outcomesSource = fmt.Sprintf("scoring_log (%d outcomes)", len(scores))
-				slog.Info("using outcomes from scoring_log", "n", len(scores))
-			}
-		} else {
-			slog.Warn("could not connect to Supabase", "error", err)
+		d, err := db.Connect(ctx, config.DatabaseURL())
+		if err != nil {
+			return nil, fmt.Errorf("DATABASE_URL is configured but unreachable: %w", err)
+		}
+		database = d
+		defer d.Close()
+		scores, labels, err := d.ScoredOutcomes(ctx, m.Version, 100000)
+		if err != nil {
+			return nil, fmt.Errorf("read scoring_log: %w", err)
+		}
+		if len(scores) >= 100 {
+			yScore, yTrue = scores, labels
+			outcomesSource = fmt.Sprintf("scoring_log (%d outcomes)", len(scores))
+			slog.Info("using outcomes from scoring_log", "n", len(scores))
 		}
 	}
 	if yTrue == nil {
@@ -107,17 +112,32 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		"gini": round(2*currentAUC-1, 4),
 	}
 
+	decileStats, rankOrderBreaks := metrics.DecileAnalysis(yTrue, yScore)
+
 	// Compare against the cleanest generalization estimate: the temporal
 	// test holdout (test is never used for fitting or early stopping).
-	trainAUC := 0.0
-	if test, ok := m.Metrics["test"]; ok {
-		trainAUC = test["auc"]
-	} else if val, ok := m.Metrics["val"]; ok {
-		trainAUC = val["auc"]
+	// A missing baseline is an explicit INSUFFICIENT status, never the
+	// 0.0 sentinel: trainAUC=0 makes every drop negative and silently
+	// reports a broken export as "performance stable".
+	trainAUC, baselineOK := baselineAUC(m.Metrics)
+	if !baselineOK {
+		slog.Warn("champion export carries no test/val baseline AUC", "model_version", m.Version)
+		return &performanceReport{
+			Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			ModelVersion:    m.Version,
+			OutcomesSource:  outcomesSource,
+			NObservations:   len(yTrue),
+			CurrentMetrics:  currentMetrics,
+			TrainingMetrics: m.Metrics,
+			AUCDropThresh:   config.AUCDropThreshold,
+			RankOrderBreaks: rankOrderBreaks,
+			DecileAnalysis:  decileStats,
+			Recommendation: "INSUFFICIENT BASELINE. The champion export records no test/val " +
+				"AUC to compare against; re-export the model (pipeline/export_model_json.py). " +
+				"Degradation check skipped.",
+		}, nil
 	}
 	aucDrop := trainAUC - currentAUC
-
-	decileStats, rankOrderBreaks := metrics.DecileAnalysis(yTrue, yScore)
 
 	slog.Info(fmt.Sprintf("Current AUC=%.4f  Training AUC=%.4f  Drop=%.4f", currentAUC, trainAUC, aucDrop))
 	slog.Info(fmt.Sprintf("Rank-ordering breaks: %d", rankOrderBreaks))
@@ -149,6 +169,23 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// baselineAUC returns the champion's recorded generalization AUC (test
+// split preferred, then val) and whether one exists at all. Explicit
+// ok-flags, never a 0.0 sentinel.
+func baselineAUC(metrics map[string]map[string]float64) (float64, bool) {
+	if test, ok := metrics["test"]; ok {
+		if v, ok := test["auc"]; ok {
+			return v, true
+		}
+	}
+	if val, ok := metrics["val"]; ok {
+		if v, ok := val["auc"]; ok {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // bothClasses reports whether the outcome labels contain at least one

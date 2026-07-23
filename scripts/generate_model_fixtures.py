@@ -76,6 +76,10 @@ def main():
                 "features": features,
                 "n_features": len(features),
                 "metrics": {},
+                # Stub clean fairness block: _validation_status fails
+                # closed on missing fairness data, and the committed
+                # parity fixture should stay semantically APPROVED.
+                "fairness": {"dir_threshold": config.DIR_THRESHOLD, "attributes": {}},
             }, f)
         calibrator, report = calibrate_model(
             model, X_cal, y_cal, X_cal, y_cal)

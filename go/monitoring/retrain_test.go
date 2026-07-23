@@ -25,9 +25,11 @@ func fair(attr, group string, dir float64) *fairnessSummary {
 }
 
 func TestFairnessGate(t *testing.T) {
-	t.Run("nil challenger does not block", func(t *testing.T) {
-		if blocked, _ := fairnessGate(nil, nil); blocked {
-			t.Error("nil challenger should not block")
+	t.Run("nil challenger summary fails closed", func(t *testing.T) {
+		blocked, reasons := fairnessGate(nil, nil)
+		if !blocked || len(reasons) != 1 || !strings.Contains(reasons[0], "missing") {
+			t.Errorf("missing challenger summary must block: blocked=%v reasons=%v",
+				blocked, reasons)
 		}
 	})
 	t.Run("challenger within threshold passes", func(t *testing.T) {

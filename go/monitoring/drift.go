@@ -25,6 +25,7 @@ import (
 type driftReport struct {
 	Timestamp              string             `json:"timestamp"`
 	ModelVersion           string             `json:"model_version"`
+	ScoresSource           string             `json:"scores_source"`
 	PSI                    float64            `json:"psi"`
 	PSIStatus              string             `json:"psi_status"`
 	PSIThresholds          map[string]float64 `json:"psi_thresholds"`
@@ -59,32 +60,41 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 
 	// Production scores and per-feature columns: Supabase scoring_log first
 	// (real scored applicants for the current model version), test set as
-	// fallback. prodFeatureCols drives CSI in both modes.
+	// fallback when no database is configured or the log is genuinely
+	// empty. A CONFIGURED database that cannot be reached or read fails
+	// the run instead: a silent test-set fallback would report "no
+	// drift" for exactly as long as the monitoring data source is down.
+	scoresSource := "test_set_proxy"
 	var (
 		productionScores []float64
 		prodFeatureCols  map[string][]float64
 		database         *db.DB
 	)
 	if config.DatabaseURL() != "" {
-		if d, err := db.Connect(ctx, config.DatabaseURL()); err == nil {
-			database = d
-			defer d.Close()
-			if scores, err := d.RecentScores(ctx, m.Version, 50000); err != nil {
-				slog.Warn("could not read scoring_log", "error", err)
-			} else if len(scores) > 0 {
-				productionScores = scores
-				slog.Info("using scores from scoring_log", "n", len(scores))
-				// Compute CSI on the same scored applicants' feature
-				// snapshots so feature drift is visible in real production
-				// mode, not only when falling back to the test set.
-				if snaps, err := d.RecentFeatureSnapshots(ctx, m.Version, 50000); err != nil {
-					slog.Warn("could not read feature snapshots for CSI", "error", err)
-				} else if len(snaps) > 0 {
-					prodFeatureCols = featureColumnsFromSnapshots(snaps, m.Features)
-				}
+		d, err := db.Connect(ctx, config.DatabaseURL())
+		if err != nil {
+			return nil, fmt.Errorf("DATABASE_URL is configured but unreachable: %w", err)
+		}
+		database = d
+		defer d.Close()
+		scores, err := d.RecentScores(ctx, m.Version, 50000)
+		if err != nil {
+			return nil, fmt.Errorf("read scoring_log: %w", err)
+		}
+		if len(scores) > 0 {
+			productionScores = scores
+			scoresSource = fmt.Sprintf("scoring_log (%d scores)", len(scores))
+			slog.Info("using scores from scoring_log", "n", len(scores))
+			// Compute CSI on the same scored applicants' feature
+			// snapshots so feature drift is visible in real production
+			// mode, not only when falling back to the test set.
+			snaps, err := d.RecentFeatureSnapshots(ctx, m.Version, 50000)
+			if err != nil {
+				return nil, fmt.Errorf("read feature snapshots for CSI: %w", err)
 			}
-		} else {
-			slog.Warn("could not connect to Supabase", "error", err)
+			if len(snaps) > 0 {
+				prodFeatureCols = featureColumnsFromSnapshots(snaps, m.Features)
+			}
 		}
 	}
 	if productionScores == nil {
@@ -137,6 +147,7 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 	rep := &driftReport{
 		Timestamp:              time.Now().UTC().Format(time.RFC3339),
 		ModelVersion:           m.Version,
+		ScoresSource:           scoresSource,
 		PSI:                    round(psi, 4),
 		PSIStatus:              psiStatus,
 		PSIThresholds:          map[string]float64{"warning": config.PSIWarning, "critical": config.PSICritical},

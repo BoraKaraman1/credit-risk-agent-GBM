@@ -35,21 +35,72 @@ def _pct(x):
     return f"{x * 100:.2f}%" if x is not None else "N/A"
 
 
-def _validation_status(meta):
-    """Derive a one-line validation verdict from the metadata."""
-    violations = []
-    for attr, a in meta.get("fairness", {}).get("attributes", {}).items():
-        for group in a.get("violations", []):
-            violations.append(f"{attr}/{group}")
+def _validation_status(meta, champion_fairness=None):
+    """Derive a one-line validation verdict from the metadata.
 
-    if violations:
+    Absolute rule: any DIR violation fails review. With
+    `champion_fairness` (the incumbent champion's fairness summary) the
+    rule is champion-relative, mirroring the Go retrain gate
+    (go/monitoring/retrain.go fairnessGate): a violation blocks only if
+    it is new, or worsens the champion's DIR on that group by more than
+    the contract's dir_worsen_tolerance. Missing fairness data fails
+    closed; absence of analysis is never approval.
+    """
+    fair = meta.get("fairness")
+    if not fair:
+        return "REVIEW REQUIRED", (
+            "No fairness analysis recorded; DIR compliance cannot be verified."
+        )
+
+    thr = fair.get("dir_threshold", config.DIR_THRESHOLD)
+    blocking, inherited = [], []
+    for attr, a in fair.get("attributes", {}).items():
+        champ_groups = {}
+        if champion_fairness:
+            champ_groups = (champion_fairness.get("attributes", {})
+                            .get(attr, {}).get("groups", {}))
+        for group in a.get("violations", []):
+            champ_dir = champ_groups.get(group, {}).get("dir")
+            if champ_dir is not None and champ_dir < thr:
+                chal_dir = a.get("groups", {}).get(group, {}).get("dir")
+                if chal_dir is not None and \
+                        chal_dir < champ_dir - config.DIR_WORSEN_TOLERANCE:
+                    blocking.append(f"{attr}/{group} (worsened: "
+                                    f"{champ_dir:.2f} -> {chal_dir:.2f})")
+                else:
+                    inherited.append(f"{attr}/{group}")
+            else:
+                blocking.append(f"{attr}/{group}")
+
+    if blocking:
         return "REVIEW REQUIRED", (
             "Disparate Impact Ratio below the 0.80 four-fifths rule for: "
-            + ", ".join(violations) + "."
+            + ", ".join(blocking) + "."
         )
     if "calibration" not in meta:
         return "REVIEW REQUIRED", "Model is not calibrated; predicted scores are not usable as PDs."
+    if inherited:
+        return "APPROVED", (
+            "Discrimination, calibration, and fairness checks passed "
+            "(champion-relative: inherited DIR violations on "
+            + ", ".join(inherited) + " not worsened)."
+        )
     return "APPROVED", "Discrimination, calibration, and fairness checks passed."
+
+
+def champion_fairness_for(model_dir):
+    """The incumbent champion's fairness summary, when `model_dir` is
+    the challenger and a champion exists; that context makes
+    _validation_status champion-relative. None otherwise, so the
+    absolute rule applies at bootstrap and when rendering the champion
+    itself (a champion must never be scored against its own summary)."""
+    if Path(model_dir).resolve() != config.challenger_dir().resolve():
+        return None
+    champ_meta = config.metadata_path(config.champion_dir())
+    if not champ_meta.exists():
+        return None
+    with open(champ_meta) as f:
+        return json.load(f).get("fairness")
 
 
 def _metrics_table(metrics):
@@ -136,9 +187,9 @@ def _hyperparameters_section(params):
     return "\n".join(lines)
 
 
-def render(meta, feature_meta):
+def render(meta, feature_meta, champion_fairness=None):
     """Render the model card markdown from metadata dicts."""
-    status, rationale = _validation_status(meta)
+    status, rationale = _validation_status(meta, champion_fairness)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     sections = [
@@ -186,7 +237,10 @@ def render(meta, feature_meta):
 
 
 def generate(model_dir=None, output_path=None):
-    """Generate the model card for a model directory."""
+    """Generate the model card for a model directory. A challenger's
+    verdict is computed champion-relative (champion_fairness_for), so
+    the card a human reviews always matches the gate the exported
+    model.json enforces."""
     model_dir = Path(model_dir) if model_dir else MODELS_DIR / "champion"
     output_path = Path(output_path) if output_path else DEFAULT_OUTPUT
 
@@ -195,7 +249,7 @@ def generate(model_dir=None, output_path=None):
     with open(GOLD_DIR / "feature_metadata.json") as f:
         feature_meta = json.load(f)
 
-    card = render(meta, feature_meta)
+    card = render(meta, feature_meta, champion_fairness_for(model_dir))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         f.write(card)

@@ -71,6 +71,88 @@ class TestValidationStatus:
         assert status == "REVIEW REQUIRED"
         assert "not calibrated" in rationale
 
+    def test_missing_fairness_fails_closed(self):
+        meta = _meta()
+        del meta["fairness"]
+        status, rationale = _validation_status(meta)
+        assert status == "REVIEW REQUIRED"
+        assert "No fairness analysis" in rationale
+
+
+def _champion_fairness(rent_dir):
+    """Champion fairness summary with RENT at the given DIR."""
+    return {
+        "dir_threshold": 0.80,
+        "attributes": {
+            "home_ownership": {
+                "groups": {
+                    "MORTGAGE": {"dir": 1.0},
+                    "RENT": {"dir": rent_dir},
+                },
+                "violations": ["RENT"] if rent_dir < 0.80 else [],
+            },
+        },
+    }
+
+
+class TestChampionRelativeStatus:
+    """Champion-relative verdicts must mirror the Go retrain gate
+    (go/monitoring/retrain.go fairnessGate): block only new-or-worsened
+    violations, with the contract's dir_worsen_tolerance."""
+
+    def test_inherited_violation_not_worsened_approves(self):
+        # Challenger RENT 0.70 vs champion 0.69: inherited, no worse.
+        status, rationale = _validation_status(
+            _meta(with_violation=True), _champion_fairness(0.69))
+        assert status == "APPROVED"
+        assert "champion-relative" in rationale
+
+    def test_new_violation_still_blocks(self):
+        # Champion clean on RENT (0.90): the challenger's violation is new.
+        status, rationale = _validation_status(
+            _meta(with_violation=True), _champion_fairness(0.90))
+        assert status == "REVIEW REQUIRED"
+        assert "home_ownership/RENT" in rationale
+
+    def test_worsened_beyond_tolerance_blocks(self):
+        # Champion violates at 0.75; challenger 0.70 is worse by > 0.01.
+        status, rationale = _validation_status(
+            _meta(with_violation=True), _champion_fairness(0.75))
+        assert status == "REVIEW REQUIRED"
+        assert "worsened" in rationale
+
+    def test_worsening_within_tolerance_passes(self):
+        # Champion 0.705 -> challenger 0.70: within the noise tolerance.
+        status, _ = _validation_status(
+            _meta(with_violation=True), _champion_fairness(0.705))
+        assert status == "APPROVED"
+
+
+class TestChampionFairnessFor:
+    def test_resolves_only_for_challenger_dir(self, tmp_path, monkeypatch):
+        import json
+
+        from pipeline.model_card import champion_fairness_for
+
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        champ = tmp_path / "champion"
+        champ.mkdir(parents=True)
+        (champ / "model_metadata.json").write_text(
+            json.dumps({"fairness": {"dir_threshold": 0.8, "attributes": {}}}))
+
+        assert champion_fairness_for(tmp_path / "challenger") == {
+            "dir_threshold": 0.8, "attributes": {}}
+        # The champion must never be scored against its own summary,
+        # and arbitrary dirs (versions/, tmp) use the absolute rule.
+        assert champion_fairness_for(champ) is None
+        assert champion_fairness_for(tmp_path / "versions" / "v1.0") is None
+
+    def test_none_without_champion(self, tmp_path, monkeypatch):
+        from pipeline.model_card import champion_fairness_for
+
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        assert champion_fairness_for(tmp_path / "challenger") is None
+
 
 class TestRender:
     def test_contains_all_sections(self):

@@ -11,6 +11,7 @@
     "auc_drop_threshold": 0.03
   },
   "fairness": {
-    "dir_threshold": 0.80
+    "dir_threshold": 0.80,
+    "dir_worsen_tolerance": 0.01
   }
 }

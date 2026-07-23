@@ -125,9 +125,12 @@ forever; retrain's deadline also bounds the Python training subprocess
 via `exec.CommandContext`.
 
 The monitors fall back to the Gold test set as a production proxy when
-`DATABASE_URL` is unset or `scoring_log` is empty, exactly like the
-Python agents. `PYTHON_BIN` overrides the interpreter used for
-challenger training (default `.venv/bin/python`, then `python3`).
+`DATABASE_URL` is unset or `scoring_log` is empty; the report labels
+the source. A configured database that cannot be reached or read fails
+the monitor run (non-zero exit) so the Airflow task alerts instead of
+green-lighting a blind check. `PYTHON_BIN` overrides the interpreter
+used for challenger training (default `.venv/bin/python`, then
+`python3`).
 
 ## Tests
 

@@ -300,7 +300,7 @@ Each scoring request writes an audit row to `scoring_log` with the feature snaps
 
 ## Monitoring Agents
 
-These are `gbm` subcommands that print a JSON report to stdout and log results to `drift_log`. When `DATABASE_URL` is unset or `scoring_log` is empty, they fall back to the Gold test set as a production proxy.
+These are `gbm` subcommands that print a JSON report to stdout and log results to `drift_log`. When `DATABASE_URL` is unset or `scoring_log` is genuinely empty, they fall back to the Gold test set as a production proxy (labeled as such in the report). A **configured but unreachable** database fails the run instead: fail closed, so a monitoring-datasource outage can never masquerade as "no drift".
 
 ```bash
 # Drift monitor — PSI on score distribution, CSI on features

@@ -33,7 +33,8 @@ type thresholdContract struct {
 		AUCDropThreshold float64 `json:"auc_drop_threshold"`
 	} `json:"monitoring"`
 	Fairness struct {
-		DIRThreshold float64 `json:"dir_threshold"`
+		DIRThreshold       float64 `json:"dir_threshold"`
+		DIRWorsenTolerance float64 `json:"dir_worsen_tolerance"`
 	} `json:"fairness"`
 }
 
@@ -45,7 +46,8 @@ func mustParseContract(b []byte) thresholdContract {
 	if !(0 < c.Decision.ApproveBelow && c.Decision.ApproveBelow < c.Decision.ReviewBelow && c.Decision.ReviewBelow < 1) ||
 		!(0 < c.Monitoring.PSIWarning && c.Monitoring.PSIWarning < c.Monitoring.PSICritical) ||
 		c.Monitoring.CSIThreshold <= 0 || c.Monitoring.AUCDropThreshold <= 0 ||
-		!(0 < c.Fairness.DIRThreshold && c.Fairness.DIRThreshold <= 1) {
+		!(0 < c.Fairness.DIRThreshold && c.Fairness.DIRThreshold <= 1) ||
+		!(0 <= c.Fairness.DIRWorsenTolerance && c.Fairness.DIRWorsenTolerance < c.Fairness.DIRThreshold) {
 		panic("config: contract.json thresholds fail sanity checks")
 	}
 	return c
@@ -63,8 +65,13 @@ var (
 // Performance thresholds
 var AUCDropThreshold = contract.Monitoring.AUCDropThreshold // AUC drop from training -> retrain
 
-// Fairness: 80% rule (four-fifths) for the Disparate Impact Ratio.
-var FairnessDIRThreshold = contract.Fairness.DIRThreshold
+// Fairness: 80% rule (four-fifths) for the Disparate Impact Ratio, and
+// how much a champion-relative gate lets an inherited violation worsen
+// before treating it as a regression (guards against retrain noise).
+var (
+	FairnessDIRThreshold    = contract.Fairness.DIRThreshold
+	FairnessWorsenTolerance = contract.Fairness.DIRWorsenTolerance
+)
 
 // Outcome backfill: a scored applicant's outcome is treated as observed
 // only after this many days have passed since scoring (loan maturation).
