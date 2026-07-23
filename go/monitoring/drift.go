@@ -162,6 +162,7 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		} else {
 			slog.Info("results logged to drift_log table")
 		}
+		syncFairnessLog(ctx, database)
 	}
 	return rep, nil
 }

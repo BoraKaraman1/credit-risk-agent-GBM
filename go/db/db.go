@@ -52,6 +52,19 @@ func (d *DB) InsertDriftLog(ctx context.Context, metricName string, metricValue 
 	return err
 }
 
+// HasDriftLogEntry reports whether drift_log already holds a row for
+// this metric and model version (used for idempotent one-row-per-version
+// publishes like the fairness summary sync).
+func (d *DB) HasDriftLogEntry(ctx context.Context, metricName, modelVersion string) (bool, error) {
+	var exists bool
+	err := d.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM drift_log
+			WHERE metric_name = $1 AND model_version = $2)`,
+		metricName, modelVersion).Scan(&exists)
+	return exists, err
+}
+
 // InsertScoringLog writes one scoring audit record.
 func (d *DB) InsertScoringLog(ctx context.Context, applicantID, modelVersion string,
 	features map[string]*float64, score float64, decision string) error {
