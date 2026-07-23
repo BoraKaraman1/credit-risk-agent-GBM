@@ -5,14 +5,21 @@ drift_log rows and API responses into frames; no streamlit, no network.
 
 from datetime import datetime
 
+import pytest
+
 from ui.core import (
     adverse_actions_frame,
+    calibration_summary,
     csi_frame,
     decile_frame,
     decision_presentation,
     fairness_frame,
+    health_presentation,
     metric_history_frame,
+    metrics_frame,
     psi_status,
+    reliability_frame,
+    validation_status_from_card,
 )
 
 FAIRNESS_DETAILS = {
@@ -102,3 +109,65 @@ class TestDetailFrames:
         ])
         assert df.iloc[0]["code"] == 2 and df.iloc[0]["feature"] == "DTI"
         assert adverse_actions_frame(None).empty
+
+
+class TestGovernanceHelpers:
+    METADATA = {
+        "version": "v1.3",
+        "metrics": {
+            "train": {"auc": 0.742, "ks": 0.3514, "gini": 0.4841},
+            "test": {"auc": 0.7063, "ks": 0.3018, "gini": 0.4126},
+        },
+        "calibration": {
+            "method": "isotonic",
+            "n_calibration_rows": 392090,
+            "n_breakpoints": 276,
+            "brier_raw": 0.176752,
+            "brier_calibrated": 0.176642,
+            "reliability_raw": [
+                {"n": 100, "mean_predicted": 0.036, "observed_default_rate": 0.052},
+            ],
+            "reliability_calibrated": [
+                {"n": 100, "mean_predicted": 0.033, "observed_default_rate": 0.050},
+            ],
+        },
+    }
+
+    def test_metrics_frame_one_row_per_split(self):
+        df = metrics_frame(self.METADATA)
+        assert list(df["split"]) == ["train", "test"]
+        assert df.loc[df["split"] == "test", "auc"].iloc[0] == 0.7063
+        assert metrics_frame({}).empty
+        assert metrics_frame(None).empty
+
+    def test_reliability_frame_long_form(self):
+        df = reliability_frame(self.METADATA["calibration"])
+        assert list(df["series"]) == ["raw", "calibrated"]
+        assert df.loc[0, "observed"] == 0.052
+        assert reliability_frame({}).empty
+        assert reliability_frame(None).empty
+
+    def test_calibration_summary_brier_gain(self):
+        s = calibration_summary(self.METADATA)
+        assert s["method"] == "isotonic"
+        assert s["brier_gain"] == pytest.approx(0.176752 - 0.176642)
+
+    def test_calibration_summary_missing_block(self):
+        s = calibration_summary({})
+        assert s["method"] is None and s["brier_gain"] is None
+
+    def test_validation_status_from_card(self):
+        approved = validation_status_from_card("## Validation Status\n**APPROVED.** Checks passed.")
+        assert approved["status"] == "APPROVED" and approved["kind"] == "good"
+        review = validation_status_from_card("## Validation Status\n**REVIEW REQUIRED.** DIR below.")
+        assert review["status"] == "REVIEW REQUIRED" and review["kind"] == "critical"
+        unknown = validation_status_from_card("")
+        assert unknown["status"] == "UNKNOWN"
+
+    def test_health_presentation(self):
+        ok = health_presentation({"status": "ok", "model_version": "v1.3",
+                                  "calibrated": True, "database": "ok"})
+        assert ok["kind"] == "good" and ok["calibrated"] is True
+        degraded = health_presentation({"status": "degraded", "database": "not_configured"})
+        assert degraded["kind"] == "critical" and degraded["database"] == "not_configured"
+        assert health_presentation({})["kind"] == "warning"

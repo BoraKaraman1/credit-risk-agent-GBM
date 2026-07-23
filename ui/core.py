@@ -114,3 +114,77 @@ def adverse_actions_frame(actions) -> pd.DataFrame:
         "value": a.get("feature_value"),
     } for a in (actions or [])]
     return pd.DataFrame(rows, columns=["code", "reason", "feature", "shap", "value"])
+
+
+# --- Model governance helpers (champion metadata + /health shaping) ---
+
+
+def metrics_frame(metadata: dict) -> pd.DataFrame:
+    """Discrimination metrics per split (train/early_stopping/test) from
+    champion model_metadata.json, one row per split."""
+    rows = []
+    for split, m in ((metadata or {}).get("metrics") or {}).items():
+        rows.append({
+            "split": split.replace("_", " "),
+            "auc": m.get("auc"), "ks": m.get("ks"), "gini": m.get("gini"),
+        })
+    return pd.DataFrame(rows, columns=["split", "auc", "ks", "gini"])
+
+
+def reliability_frame(calibration: dict) -> pd.DataFrame:
+    """Reliability (calibration) curve points, long form with a series
+    column distinguishing raw vs calibrated predictions."""
+    rows = []
+    for series, key in (("raw", "reliability_raw"),
+                        ("calibrated", "reliability_calibrated")):
+        for b in (calibration or {}).get(key) or []:
+            rows.append({
+                "series": series,
+                "mean_predicted": b.get("mean_predicted"),
+                "observed": b.get("observed_default_rate"),
+                "n": b.get("n"),
+            })
+    return pd.DataFrame(rows, columns=["series", "mean_predicted", "observed", "n"])
+
+
+def calibration_summary(metadata: dict) -> dict:
+    """Headline calibration facts from champion metadata; missing fields
+    come back as None so the page can degrade gracefully."""
+    cal = (metadata or {}).get("calibration") or {}
+    raw, fitted = cal.get("brier_raw"), cal.get("brier_calibrated")
+    gain = (raw - fitted) if isinstance(raw, (int, float)) and isinstance(fitted, (int, float)) else None
+    return {
+        "method": cal.get("method"),
+        "n_calibration_rows": cal.get("n_calibration_rows"),
+        "n_breakpoints": cal.get("n_breakpoints"),
+        "brier_raw": raw,
+        "brier_calibrated": fitted,
+        "brier_gain": gain,
+    }
+
+
+def validation_status_from_card(card_text: str) -> dict:
+    """Extract the governance verdict from the generated model card's
+    Validation Status section. The card is the human-readable source of
+    the same verdict model.json carries for the serving gate."""
+    text = card_text or ""
+    if "REVIEW REQUIRED" in text:
+        return {"status": "REVIEW REQUIRED", "kind": "critical", "icon": "⛔"}
+    if "APPROVED" in text:
+        return {"status": "APPROVED", "kind": "good", "icon": "✅"}
+    return {"status": "UNKNOWN", "kind": "warning", "icon": "❔"}
+
+
+def health_presentation(health: dict) -> dict:
+    """Shape a /health response into status tiles. `status` is ok/degraded
+    as reported by the API (it returns 503 when degraded)."""
+    status = (health or {}).get("status", "unknown")
+    kind = {"ok": "good", "degraded": "critical"}.get(status, "warning")
+    return {
+        "status": status,
+        "kind": kind,
+        "model_version": (health or {}).get("model_version", "?"),
+        "calibrated": bool((health or {}).get("calibrated")),
+        "database": (health or {}).get("database", "unknown"),
+        "loaded_at": (health or {}).get("model_loaded_at"),
+    }

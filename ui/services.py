@@ -6,10 +6,14 @@ Configuration (environment):
     API_URL       scoring API base URL   (default http://localhost:8000)
     API_KEY       X-API-Key for /score   (empty = no header)
     DATABASE_URL  Postgres DSN for drift_log / applicant_features
+    CREDIT_RISK_MODELS_DIR  champion artifacts for the governance page
+                  (default data/models, read-only)
+    MODEL_CARD_PATH         generated model card (default docs/model_card.md)
 """
 
 import json
 import os
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -32,6 +36,18 @@ def api_health() -> dict:
     resp = requests.get(f"{api_url()}/health", timeout=API_TIMEOUT_SECONDS)
     resp.raise_for_status()
     return resp.json()
+
+
+def api_health_full() -> tuple[dict, int]:
+    """GET /health, returning (body, status_code). Unlike api_health this
+    tolerates the 503 the API returns when degraded — the governance page
+    exists precisely to show that state."""
+    resp = requests.get(f"{api_url()}/health", timeout=API_TIMEOUT_SECONDS)
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {"detail": resp.text}
+    return body, resp.status_code
 
 
 def api_score(applicant_id: str) -> tuple[dict, int]:
@@ -91,3 +107,30 @@ def sample_applicant_ids(limit: int = 200) -> list[str]:
             LIMIT :limit
         """), {"limit": limit}).fetchall()
     return [r[0] for r in rows]
+
+
+# --- Governance page artifacts (published champion outputs, read-only) ---
+#
+# The governance page breaks the "API + Postgres only" rule deliberately:
+# the model card and champion metadata are published artifacts, not live
+# state, and model.json itself is never loaded here (it carries the full
+# tree arrays and can be tens of MB).
+
+
+@st.cache_data(ttl=60)
+def champion_metadata() -> dict | None:
+    """champion/model_metadata.json; None when no champion is on disk."""
+    path = Path(os.getenv("CREDIT_RISK_MODELS_DIR", "data/models")) / "champion" / "model_metadata.json"
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+@st.cache_data(ttl=60)
+def model_card_markdown() -> str | None:
+    """The generated model card (docs/model_card.md); None when absent."""
+    try:
+        return Path(os.getenv("MODEL_CARD_PATH", "docs/model_card.md")).read_text()
+    except OSError:
+        return None

@@ -63,6 +63,11 @@ services:
       # override API_KEYS, also set UI_API_KEY to one of those keys.
       API_KEY: ${UI_API_KEY:-demo-local-key}
       DATABASE_URL: postgresql://${POSTGRES_USER:-credit_risk}:${POSTGRES_PASSWORD:-credit_risk}@postgres:5432/${POSTGRES_DB:-credit_risk}
+    # Governance page reads the published champion artifacts and the
+    # generated model card read-only (WORKDIR is /app).
+    volumes:
+      - ./data/models:/app/data/models:ro
+      - ./docs:/app/docs:ro
     ports:
       - "8501:8501"
     depends_on:
