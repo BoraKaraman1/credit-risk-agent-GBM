@@ -180,9 +180,11 @@ def health_presentation(health: dict) -> dict:
     as reported by the API (it returns 503 when degraded)."""
     status = (health or {}).get("status", "unknown")
     kind = {"ok": "good", "degraded": "critical"}.get(status, "warning")
+    icon = {"good": "✅", "critical": "⛔", "warning": "⚠️"}[kind]
     return {
         "status": status,
         "kind": kind,
+        "icon": icon,
         "model_version": (health or {}).get("model_version", "?"),
         "calibrated": bool((health or {}).get("calibrated")),
         "database": (health or {}).get("database", "unknown"),

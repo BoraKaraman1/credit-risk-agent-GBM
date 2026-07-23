@@ -141,6 +141,8 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 			"auc_drop":          round(aucDrop, 4),
 			"ks":                currentMetrics["ks"],
 			"rank_order_breaks": rankOrderBreaks,
+			"outcomes_source":   outcomesSource,
+			"decile_analysis":   decileStats,
 		})
 		if err != nil {
 			slog.Warn("could not log to Supabase", "error", err)

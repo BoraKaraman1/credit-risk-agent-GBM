@@ -167,7 +167,8 @@ class TestGovernanceHelpers:
     def test_health_presentation(self):
         ok = health_presentation({"status": "ok", "model_version": "v1.3",
                                   "calibrated": True, "database": "ok"})
-        assert ok["kind"] == "good" and ok["calibrated"] is True
+        assert ok["kind"] == "good" and ok["calibrated"] is True and ok["icon"]
         degraded = health_presentation({"status": "degraded", "database": "not_configured"})
         assert degraded["kind"] == "critical" and degraded["database"] == "not_configured"
-        assert health_presentation({})["kind"] == "warning"
+        unknown = health_presentation({})
+        assert unknown["kind"] == "warning" and unknown["icon"]

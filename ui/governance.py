@@ -11,7 +11,7 @@ from ui import core, services
 
 def _status_banner(pres: dict, prefix: str = ""):
     banner = {"good": st.success, "warning": st.warning, "critical": st.error}[pres["kind"]]
-    banner(f"{prefix}{pres['icon']} **{pres['status']}**")
+    banner(f"{prefix}{pres.get('icon', '')} **{pres['status']}**")
 
 
 def _model_card_tab(metadata, card):
