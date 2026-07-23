@@ -141,11 +141,15 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// nextVersion bumps the champion's minor version (v1.2 -> v1.3).
+// nextVersion bumps the champion's minor version (v1.2 -> v1.3). A
+// "-tag" suffix (e.g. a promoted reject-inference challenger's
+// "v1.2-ri") is ignored, matching pipeline/config.py's parse_version,
+// so both languages mint the same successor and never collide.
 func nextVersion(championVersion string) string {
 	parts := strings.SplitN(strings.TrimPrefix(championVersion, "v"), ".", 2)
 	if len(parts) == 2 {
-		if minor, err := strconv.Atoi(parts[1]); err == nil {
+		minorPart, _, _ := strings.Cut(parts[1], "-")
+		if minor, err := strconv.Atoi(minorPart); err == nil {
 			return fmt.Sprintf("v%s.%d", parts[0], minor+1)
 		}
 	}

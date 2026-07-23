@@ -13,6 +13,8 @@ from pipeline.reject_inference import (
     assign_pseudo_labels,
     compare_models,
     compute_ks,
+    save_augmented_model,
+    train_augmented_model,
     REJECT_DEFAULT_MULTIPLIER,
     REJECT_DEFAULT_CAP,
 )
@@ -176,6 +178,70 @@ class TestCompareModels:
         model = _train_dummy_model(X, y)
         result = compare_models(model, model, X, y, cols)
         assert result["psi_between_models"] >= 0
+
+
+# --- Augmented training smoke tests ---
+# These execute the orchestration layer end to end on synthetic data: a
+# phantom function call or a broken return contract in
+# train_augmented_model/save_augmented_model must fail here, not in
+# production.
+
+class TestTrainAugmentedModel:
+    def setup_method(self):
+        rng = np.random.RandomState(42)
+        self.feature_cols = [f"feat_{i}" for i in range(5)]
+        self.X_acc = pd.DataFrame(rng.randn(200, 5), columns=self.feature_cols)
+        self.y_acc = pd.Series(rng.choice([0, 1], 200, p=[0.8, 0.2]))
+        # Rejected rows are shifted far from the accepted cloud so any
+        # pseudo-labeled row is identifiable by its feature values.
+        self.X_rej = pd.DataFrame(rng.randn(80, 5) + 1000.0, columns=self.feature_cols)
+        self.y_rej = pd.Series(rng.choice([0, 1], 80, p=[0.6, 0.4]))
+        self.X_val = pd.DataFrame(rng.randn(60, 5), columns=self.feature_cols)
+        self.y_val = pd.Series(rng.choice([0, 1], 60, p=[0.8, 0.2]))
+
+    def _run(self):
+        return train_augmented_model(
+            self.X_acc, self.y_acc, self.X_rej, self.y_rej,
+            self.X_val, self.y_val,
+        )
+
+    def test_executes_and_returns_scoring_model(self):
+        model, X_es, y_es = self._run()
+        probs = model.predict_proba(self.X_acc[self.feature_cols])[:, 1]
+        assert len(probs) == len(self.X_acc)
+        assert all(0 <= p <= 1 for p in probs)
+
+    def test_calibration_carveout_is_observed_rows_only(self):
+        _, X_es, y_es = self._run()
+        assert len(X_es) == len(y_es)
+        assert len(X_es) > 0
+        # No row from the shifted (pseudo-labeled) rejected cloud may
+        # reach the calibration carve-out.
+        assert (X_es["feat_0"] < 500).all()
+
+
+class TestSaveAugmentedModel:
+    def test_versions_relative_to_champion_with_ri_tag(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        champ = tmp_path / "champion"
+        champ.mkdir(parents=True)
+        (champ / "model_metadata.json").write_text(json.dumps({"version": "v2.5"}))
+
+        X, y, cols = _make_feature_data(n=200)
+        model = _train_dummy_model(X, y)
+        comparison = {"augmented": {"auc": 0.7, "ks": 0.3, "gini": 0.4},
+                      "champion": {"auc": 0.7, "ks": 0.3, "gini": 0.4},
+                      "psi_between_models": 0.01, "auc_delta": 0.0}
+        version = save_augmented_model(model, cols, {"test": comparison["augmented"]},
+                                       comparison)
+        assert version == "v2.6-ri"
+        meta = json.loads((tmp_path / "challenger" / "model_metadata.json").read_text())
+        assert meta["version"] == "v2.6-ri"
+        # Test metrics recorded under the test key only — no fabricated
+        # train split in the model card.
+        assert set(meta["metrics"]) == {"test"}
 
 
 # --- Training utility tests ---

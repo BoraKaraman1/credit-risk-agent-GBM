@@ -82,6 +82,23 @@ func TestFairnessGate(t *testing.T) {
 	})
 }
 
+func TestNextVersion(t *testing.T) {
+	// Must agree with pipeline/config.py parse_version/next_version:
+	// minor bumps, "-tag" suffixes ignored, garbage restarts at v1.0.
+	cases := []struct{ in, want string }{
+		{"v1.2", "v1.3"},
+		{"v10.31", "v10.32"},
+		{"v1.2-ri", "v1.3"},
+		{"weird", "v1.0"},
+		{"", "v1.0"},
+	}
+	for _, c := range cases {
+		if got := nextVersion(c.in); got != c.want {
+			t.Errorf("nextVersion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestRetrainRecommendationFairnessOverride(t *testing.T) {
 	champion := &testMetrics{AUC: 0.70, KS: 0.30}
 	challenger := testMetrics{AUC: 0.99, KS: 0.50} // far better AUC

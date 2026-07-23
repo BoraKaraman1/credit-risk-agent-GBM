@@ -482,6 +482,8 @@ The pipeline includes a parcelling-based reject inference module (`pipeline/reje
 3. Retrains on the combined dataset with rejected samples weighted at 0.3
 4. Compares the augmented model to the champion and saves as challenger
 
+Two honesty notes, stated in the module itself: the calibrator is fit on **observed outcomes only** (pseudo-labels never touch the PD scale), and the champion-vs-augmented comparison runs on the accepted-only test set, the very sample reject inference tries to de-bias, so it measures the cost of augmentation rather than its through-the-door benefit (which has no ground truth).
+
 ## Containers
 
 The project has separate images for the API, batch pipeline, Airflow, and tests. Runtime images do not copy `.env`, `.venv`, notebooks, raw data, or model artifacts; models and data should be mounted or supplied by the deployment environment.

@@ -8,6 +8,15 @@ Steps:
 3. Score rejected applicants → assign pseudo-labels
 4. Retrain on combined (accepted + pseudo-labeled rejected) with sample weights
 5. Compare augmented vs champion → save as challenger if improved
+
+Known limitation, stated openly: the comparison in step 5 uses the
+accepted-only test set, which is exactly the selection-biased sample
+reject inference tries to correct for. An improvement on the
+through-the-door population is structurally invisible to that metric
+(there is no ground truth for rejected applicants), so the accepted-set
+AUC delta measures the cost of the augmentation, not its benefit. The
+calibrator is therefore fit on observed outcomes only; pseudo-labels
+never touch the PD scale that pricing and provisioning consume.
 """
 
 import json
@@ -71,7 +80,6 @@ def align_rejected_features(rejected, feature_cols, train):
     Overlapping features are mapped directly; missing features are filled
     with training set medians (conservative imputation).
     """
-    np.random.seed(42)
     sample_size = min(REJECT_SAMPLE_SIZE, len(rejected))
     rejected_sample = rejected.sample(n=sample_size, random_state=42).copy()
 
@@ -139,14 +147,17 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
     X_all = pd.concat([X_combined, X_val], ignore_index=True)
     y_all = pd.concat([y_combined, y_val], ignore_index=True)
     weights_all = np.concatenate([sample_weights, np.ones(len(X_val))])
-    # Same Kamiran-Calders reweighing as the champion recipe, composed
-    # with the pseudo-label uncertainty weights, so the augmented
-    # challenger faces the same fairness bar as any champion candidate.
-    weights_all = weights_all * fairness.reweigh_weights(X_all, y_all)
+    # Pseudo-labeled rows carry fabricated outcomes; track them so the
+    # calibrator downstream is fit on observed labels only.
+    is_pseudo = np.concatenate([
+        np.zeros(len(X_accepted), dtype=bool),
+        np.ones(len(X_rejected), dtype=bool),
+        np.zeros(len(X_val), dtype=bool),
+    ])
     val_fraction = len(X_val) / len(X_all)
 
-    X_fit, X_es, y_fit, y_es, w_fit, _ = train_test_split(
-        X_all, y_all, weights_all, test_size=val_fraction,
+    X_fit, X_es, y_fit, y_es, w_fit, _, _, pseudo_es = train_test_split(
+        X_all, y_all, weights_all, is_pseudo, test_size=val_fraction,
         random_state=42, stratify=y_all,
     )
 
@@ -175,8 +186,15 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
     )
     logger.info(f"Augmented model iterations: {model.best_iteration_}")
 
-    # The carve-out is returned for calibration (it never saw gradients).
-    return model, X_es, y_es
+    # The carve-out is returned for calibration (it never saw gradients)
+    # with pseudo-labeled rows removed: a calibrator anchored to the
+    # assumed 2x default multiplier would corrupt the PD scale that
+    # pricing/provisioning consume downstream.
+    X_es_obs = X_es[~pseudo_es]
+    y_es_obs = y_es[~pseudo_es]
+    logger.info(f"Calibration carve-out: {len(X_es_obs):,} observed rows "
+                f"({int(pseudo_es.sum()):,} pseudo-labeled rows excluded)")
+    return model, X_es_obs, y_es_obs
 
 
 def compare_models(champion, augmented, X_test, y_test, feature_cols):
@@ -232,16 +250,7 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
     # new one (fit right after this save) replaces it.
     (dest / "calibrator.joblib").unlink(missing_ok=True)
 
-    # Determine version
-    champion_meta_path = config.metadata_path(config.champion_dir())
-    if champion_meta_path.exists():
-        with open(champion_meta_path) as f:
-            prev = json.load(f)
-        prev_version = prev.get("version", "v1.0")
-        major, minor = prev_version.lstrip("v").split(".")
-        version = f"v{major}.{int(minor) + 1}-ri"
-    else:
-        version = "v1.0-ri"
+    version = config.next_version(suffix="-ri")
 
     meta = {
         "version": version,
@@ -307,11 +316,10 @@ def run():
         comparison = compare_models(champion_model, augmented_model,
                                     X_test, y_test, feature_cols)
 
-        # Evaluate augmented model metrics
-        aug_metrics = {
-            "train": comparison["augmented"],
-            "test": comparison["augmented"],
-        }
+        # Test-set metrics only: the comparison is computed on the test
+        # split, and recording it under any other key would misstate the
+        # split in the model card.
+        aug_metrics = {"test": comparison["augmented"]}
 
         # Log to MLflow
         mlflow.log_params({
