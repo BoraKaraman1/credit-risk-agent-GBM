@@ -20,6 +20,28 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-credit_risk}
+      PGUSER: ${POSTGRES_USER:-credit_risk}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-credit_risk}
+      # Bump this value whenever the mounted schema gains a migration.
+      # Compose then recreates a previously completed one-shot container.
+      SCHEMA_MIGRATION_REVISION: "20260723_01"
+    volumes:
+      - ./pipeline/supabase_schema.sql:/migrations/001_schema.sql:ro
+    command:
+      - psql
+      - --set=ON_ERROR_STOP=1
+      - --file=/migrations/001_schema.sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -49,6 +71,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
       interval: 30s
@@ -107,6 +131,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   prometheus:
     image: prom/prometheus:v2.54.1

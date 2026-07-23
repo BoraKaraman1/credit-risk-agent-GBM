@@ -19,6 +19,8 @@ go/bin/
 
 Dockerfile*
 docker-compose*.yml
+# The test image runs tests/test_compose.py against the compose topology.
+!docker-compose.yml
 README.md
 CHANGELOG.md
 LICENSE

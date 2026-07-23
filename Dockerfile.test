@@ -25,6 +25,7 @@ COPY ui/ ./ui/
 COPY dags/ ./dags/
 COPY agents/ ./agents/
 COPY pytest.ini ./
+COPY docker-compose.yml ./
 COPY go/shared/config/contract.json go/shared/config/contract.json
 
 USER app

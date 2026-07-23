@@ -117,13 +117,13 @@ and uses the `shap` library at serve time, whereas the Go layer consumes
 ## `notebooks/` — analysis notebooks
 
 - **`01_eda.ipynb`** — EDA of the Gold feature set: class balance, temporal drift, distributions, correlations, default rate by grade/FICO band.
-- **`02_training.ipynb`** — Training walkthrough with MLflow tracking, ROC/PR/calibration curves, decile rank-ordering analysis. (Markdown references `HistGradientBoostingClassifier`; production uses LightGBM.)
+- **`02_training.ipynb`** — LightGBM training walkthrough using the production training helper, with ROC/PR/calibration curves and decile rank-ordering analysis.
 - **`03_shap_analysis.ipynb`** — SHAP interpretability (global importance, dependence plots, per-decision waterfall) motivated by SR 11-7 / ECOA explainability.
 - **`04_reject_inference.ipynb`** — Reject-inference parcelling demo: alignment, pseudo-labeling, weighted retraining, champion-vs-augmented comparison with PSI.
 
 ## Infra
 
-- **`docker-compose.yml`** — Local dev stack: Postgres 16 (schema from `pipeline/supabase_schema.sql`), the Go scoring API (port 8000), the Streamlit UI (port 8501), optional `orchestration` profile with single-container Airflow standalone (port 8080, `./data` mounted in), optional `monitoring` profile with Prometheus + Grafana. Local-only credentials.
+- **`docker-compose.yml`** — Local dev stack: Postgres 16, a required one-shot schema migration gate, the Go scoring API (port 8000), the Streamlit UI (port 8501), optional `orchestration` profile with single-container Airflow standalone (port 8080, `./data` mounted in), optional `monitoring` profile with Prometheus + Grafana. Local-only credentials.
 - **`Dockerfile.airflow`** — Airflow 2.8.4 image with the compiled `gbm` binary embedded (multi-stage Go build) so DAGs can invoke Go jobs via `CREDIT_RISK_GO_BIN`.
 - **`Dockerfile.api`** — Multi-stage build of the `gbm` binary on slim Debian, non-root, `/health` healthcheck; entrypoint `gbm serve` on port 8000.
 - **`Dockerfile.pipeline`** — Python 3.11-slim image running `python pipeline/train.py` as non-root.

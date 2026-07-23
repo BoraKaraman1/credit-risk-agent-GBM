@@ -1,5 +1,6 @@
 -- Credit Risk Feature Store — Supabase PostgreSQL Schema
--- Run this in the Supabase SQL Editor to create all tables.
+-- Idempotent bootstrap plus forward migrations. Docker Compose reruns this
+-- through its migration gate before starting database-dependent services.
 
 -- Feature store: immutable-contract snapshots per applicant and version
 CREATE TABLE IF NOT EXISTS applicant_features (

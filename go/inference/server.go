@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"sync"
 	"syscall"
@@ -177,9 +178,12 @@ type httpError struct {
 func (e *httpError) Error() string { return e.detail }
 
 type server struct {
+	reloadMu sync.Mutex
+
 	mu            sync.RWMutex
 	model         *model.Model
 	modelLoadedAt string
+	loadModelFile func(string) (*model.Model, error)
 
 	dbMu sync.Mutex
 	db   scoringStore
@@ -200,9 +204,38 @@ type scoringStore interface {
 }
 
 func (s *server) loadModel() error {
-	m, err := model.Load(config.ChampionModelPath())
+	// Only one reload may resolve and publish a champion at a time. This
+	// makes an activation reload and its rollback reload land in request
+	// order instead of racing to be the last model swap.
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	championPath := config.ChampionModelPath()
+	resolvedBefore, err := filepath.EvalSymlinks(championPath)
+	if err != nil {
+		return fmt.Errorf("resolve champion model: %w", err)
+	}
+	loader := s.loadModelFile
+	if loader == nil {
+		loader = model.Load
+	}
+	m, err := loader(resolvedBefore)
 	if err != nil {
 		return fmt.Errorf("%w (run pipeline/export_model_json.py to export the champion model)", err)
+	}
+	// Promotion changes champion with an atomic symlink swap. If that
+	// pointer moved while the artifact was being read, this load is stale
+	// and must never replace the currently served model. A following reload
+	// will resolve and load the new target.
+	resolvedAfter, err := filepath.EvalSymlinks(championPath)
+	if err != nil {
+		return fmt.Errorf("recheck champion model: %w", err)
+	}
+	if resolvedAfter != resolvedBefore {
+		return fmt.Errorf(
+			"champion changed during reload (%s -> %s); stale model was not activated",
+			resolvedBefore, resolvedAfter,
+		)
 	}
 	if err := checkModelGovernance(m); err != nil {
 		return err

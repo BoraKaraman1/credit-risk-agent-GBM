@@ -2,6 +2,9 @@ package inference
 
 import (
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/shared/model"
@@ -63,5 +66,80 @@ func TestComputeAdverseActions(t *testing.T) {
 				t.Errorf("raw feature name %q leaked into response", raw)
 			}
 		}
+	}
+}
+
+func TestLoadModelRejectsStaleChampionAndSerializesReload(t *testing.T) {
+	modelsDir := t.TempDir()
+	t.Setenv("CREDIT_RISK_MODELS_DIR", modelsDir)
+
+	versionsDir := filepath.Join(modelsDir, "versions")
+	for _, version := range []string{"v1", "v2"} {
+		dir := filepath.Join(versionsDir, version)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "model.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	champion := filepath.Join(modelsDir, "champion")
+	if err := os.Symlink(filepath.Join("versions", "v2"), champion); err != nil {
+		t.Fatal(err)
+	}
+
+	v2Started := make(chan struct{})
+	releaseV2 := make(chan struct{})
+	v1Started := make(chan struct{})
+	approved := &model.ValidationStatus{Status: "APPROVED"}
+	s := &server{
+		model: &model.Model{Version: "v1"},
+		loadModelFile: func(path string) (*model.Model, error) {
+			switch {
+			case strings.Contains(path, filepath.Join("versions", "v2")):
+				close(v2Started)
+				<-releaseV2
+				return &model.Model{Version: "v2", ValidationStatus: approved}, nil
+			case strings.Contains(path, filepath.Join("versions", "v1")):
+				close(v1Started)
+				return &model.Model{Version: "v1", ValidationStatus: approved}, nil
+			default:
+				return nil, &os.PathError{Op: "load", Path: path, Err: os.ErrNotExist}
+			}
+		},
+	}
+
+	firstErr := make(chan error, 1)
+	go func() { firstErr <- s.loadModel() }()
+	<-v2Started
+
+	next := filepath.Join(modelsDir, ".champion.rollback")
+	if err := os.Symlink(filepath.Join("versions", "v1"), next); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, champion); err != nil {
+		t.Fatal(err)
+	}
+
+	secondErr := make(chan error, 1)
+	go func() { secondErr <- s.loadModel() }()
+
+	// The rollback load cannot enter the model loader while the activation
+	// load owns reloadMu.
+	select {
+	case <-v1Started:
+		t.Fatal("rollback reload ran concurrently with activation reload")
+	default:
+	}
+
+	close(releaseV2)
+	if err := <-firstErr; err == nil || !strings.Contains(err.Error(), "champion changed during reload") {
+		t.Fatalf("stale activation error = %v", err)
+	}
+	if err := <-secondErr; err != nil {
+		t.Fatalf("rollback reload: %v", err)
+	}
+	if got, _ := s.currentModel(); got.Version != "v1" {
+		t.Fatalf("served model = %q, want rolled-back v1", got.Version)
 	}
 }

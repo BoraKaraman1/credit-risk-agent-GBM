@@ -247,8 +247,8 @@ Grafana is at `http://localhost:3000` (anonymous viewer access enabled),
 Prometheus at `http://localhost:9090`. The dashboard has panels for
 request rate by status, p95 latency by endpoint, decisions per second,
 the predicted-PD distribution (median and p90), and the loaded model
-version. The default `docker compose up` is unchanged: it runs only
-Postgres and the API.
+version. The default stack also runs the required one-shot database
+migration gate before starting the API.
 
 ### Server hardening
 

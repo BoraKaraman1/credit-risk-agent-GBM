@@ -514,7 +514,7 @@ The API image runs as a non-root user and exposes `/health` as its Docker health
 
 ### Local Compose Stack
 
-Start local Postgres, initialize `pipeline/supabase_schema.sql`, and run the API against the mounted local champion model. The first (bootstrap) champion is `REVIEW REQUIRED` (structural disparities in the public LendingClub data), so the governance gate fails closed by default; explicitly accept serving an unapproved model to run the demo. Once a champion exists, challenger exports are judged champion-relative and can be `APPROVED`, after which the override is unnecessary:
+Start local Postgres and run the API against the mounted local champion model. Before the API starts, the one-shot `migrate` service applies the idempotent `pipeline/supabase_schema.sql` to both fresh and persistent database volumes. Bump `SCHEMA_MIGRATION_REVISION` in `docker-compose.yml` whenever that schema gains a forward migration so Compose recreates the completed migration container. The first (bootstrap) champion is `REVIEW REQUIRED` (structural disparities in the public LendingClub data), so the governance gate fails closed by default; explicitly accept serving an unapproved model to run the demo. Once a champion exists, challenger exports are judged champion-relative and can be `APPROVED`, after which the override is unnecessary:
 
 ```bash
 ALLOW_UNAPPROVED_MODEL=true docker compose up --build postgres api
