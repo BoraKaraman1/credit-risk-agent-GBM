@@ -43,7 +43,7 @@ func syncFeatures(ctx context.Context, d *db.DB) error {
 
 	// Test set only — simulates active applicants awaiting scoring
 	// (training data is historical, not needed in the feature store)
-	cols := append(append([]string{}, featureCols...), "fico_score", "grade_numeric")
+	cols := append(append([]string{}, featureCols...), "fico_score", "grade_numeric", "id")
 	frame, err := gold.ReadColumns(filepath.Join(config.GoldDir(), "features_test.parquet"), cols)
 	if err != nil {
 		return err
@@ -71,8 +71,15 @@ func syncFeatures(ctx context.Context, d *db.DB) error {
 			}
 			completeness := round(float64(nonNull)/float64(len(featureCols)), 3)
 
+			// Applicant identity is the stable LendingClub loan id
+			// carried through the medallion layers, never the row
+			// position (which changes across regenerations).
+			loanID := frame.Columns["id"][i]
+			if math.IsNaN(loanID) {
+				return fmt.Errorf("row %d has no loan id", i)
+			}
 			row := db.FeatureRow{
-				ApplicantID:      fmt.Sprintf("LC_%07d", i),
+				ApplicantID:      fmt.Sprintf("LC_%d", int64(loanID)),
 				FeatureVersion:   featureVersion,
 				ComputedAt:       now,
 				Features:         features,

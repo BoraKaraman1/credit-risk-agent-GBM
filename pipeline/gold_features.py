@@ -159,8 +159,8 @@ def run():
     val.to_parquet(GOLD_DIR / "features_val.parquet", index=False)
     test.to_parquet(GOLD_DIR / "features_test.parquet", index=False)
 
-    # Feature columns (everything except target)
-    feature_cols = [c for c in train.columns if c != "default"]
+    # Feature columns (everything except target and the passthrough id)
+    feature_cols = [c for c in train.columns if c not in ("default", "id")]
 
     # Save metadata
     metadata = {

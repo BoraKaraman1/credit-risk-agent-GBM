@@ -205,13 +205,13 @@ API_KEYS=your-key PORT=8000 ./go/bin/gbm serve
 curl -X POST http://localhost:8000/score \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
-  -d '{"applicant_id": "LC_0000001"}'
+  -d '{"applicant_id": "LC_130956066"}'
 
 # Batch scoring
 curl -X POST http://localhost:8000/score/batch \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
-  -d '{"applicant_ids": ["LC_0000001", "LC_0000002"]}'
+  -d '{"applicant_ids": ["LC_130956066", "LC_130968727"]}'
 
 # Health check (open; reports model + database readiness)
 curl http://localhost:8000/health
@@ -255,7 +255,7 @@ For decline and manual-review decisions, the API returns the top 4 SHAP-based ad
 Example response (truncated):
 ```json
 {
-  "applicant_id": "LC_0000001",
+  "applicant_id": "LC_130956066",
   "score": 0.42,
   "pd": 0.40562,
   "scaled_score": 512,

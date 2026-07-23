@@ -79,8 +79,13 @@ def transform_accepted():
     logger.info(f"After filtering to resolved loans: {len(df):,}")
     logger.info(f"Default rate: {df['default'].mean():.4f} ({df['default'].sum():,} defaults)")
 
+    # --- Stable LendingClub loan id: carried through to Gold so the
+    # feature store and outcome backfill key on real identity, never on
+    # row position ---
+    df["id"] = df["id"].astype("int64")
+
     # --- Keep issue_d for time-aware splitting in Gold, then origination cols ---
-    keep_cols = ORIGINATION_COLS + ["default"]
+    keep_cols = ["id"] + ORIGINATION_COLS + ["default"]
     if "issue_d" in df.columns:
         keep_cols = ["issue_d"] + keep_cols
     df = df[keep_cols].copy()

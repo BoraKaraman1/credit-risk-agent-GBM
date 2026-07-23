@@ -4,7 +4,7 @@
 // performance monitor falls back to the test-set proxy. This job
 // simulates outcomes arriving: for applicants scored at least
 // OUTCOME_BACKFILL_DELAY_DAYS ago, it looks up the true label from the
-// Gold test set (applicant_id LC_<row-index>) and writes it back. Once
+// Gold test set (applicant_id LC_<loan-id>) and writes it back. Once
 // enough outcomes accumulate, the performance monitor runs on production
 // data instead of the proxy.
 package monitoring
@@ -33,47 +33,52 @@ type backfillReport struct {
 	RowsUpdated       int64  `json:"rows_updated"`
 }
 
-// indexFromApplicantID parses the test-set row index out of an applicant
-// ID of the form "LC_0000042". The synthetic feature store assigns these
-// IDs by Gold test-set row position (see syncFeatures in sync.go).
-func indexFromApplicantID(id string) (int, bool) {
+// loanIDFromApplicantID parses the LendingClub loan id out of an
+// applicant ID of the form "LC_68407277" (assigned from the Gold id
+// column by syncFeatures in sync.go).
+func loanIDFromApplicantID(id string) (int64, bool) {
 	const prefix = "LC_"
 	if !strings.HasPrefix(id, prefix) {
 		return 0, false
 	}
-	n, err := strconv.Atoi(id[len(prefix):])
+	n, err := strconv.ParseInt(id[len(prefix):], 10, 64)
 	if err != nil || n < 0 {
 		return 0, false
 	}
 	return n, true
 }
 
-// buildBackfill pairs each pending applicant ID with its true label.
-// IDs that do not map to a Gold test-set row are skipped.
-func buildBackfill(pendingIDs []string, labels []bool) (ids []string, outLabels []bool, skipped int) {
+// buildBackfill pairs each pending applicant ID with its true label,
+// keyed by stable loan id — never by row position, which changes when
+// the Gold parquet is regenerated. Unknown IDs are skipped.
+func buildBackfill(pendingIDs []string, labels map[int64]bool) (ids []string, outLabels []bool, skipped int) {
 	for _, id := range pendingIDs {
-		idx, ok := indexFromApplicantID(id)
-		if !ok || idx >= len(labels) {
+		loanID, ok := loanIDFromApplicantID(id)
+		if !ok {
+			skipped++
+			continue
+		}
+		label, ok := labels[loanID]
+		if !ok {
 			skipped++
 			continue
 		}
 		ids = append(ids, id)
-		outLabels = append(outLabels, labels[idx])
+		outLabels = append(outLabels, label)
 	}
 	return ids, outLabels, skipped
 }
 
-// testLabels reads the Gold test-set default column as booleans indexed
-// by row position.
-func testLabels() ([]bool, error) {
+// testLabels reads the Gold test set as a loan-id -> default map.
+func testLabels() (map[int64]bool, error) {
 	frame, err := gold.ReadColumns(
-		filepath.Join(config.GoldDir(), "features_test.parquet"), []string{"default"})
+		filepath.Join(config.GoldDir(), "features_test.parquet"), []string{"id", "default"})
 	if err != nil {
 		return nil, err
 	}
-	labels := make([]bool, frame.NumRows)
+	labels := make(map[int64]bool, frame.NumRows)
 	for i, v := range frame.Columns["default"] {
-		labels[i] = v != 0
+		labels[int64(frame.Columns["id"][i])] = v != 0
 	}
 	return labels, nil
 }
