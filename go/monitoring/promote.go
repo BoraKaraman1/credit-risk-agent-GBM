@@ -32,6 +32,24 @@ func promoteChallenger(modelsDir string) (string, error) {
 		return "", fmt.Errorf("challenger model has no version")
 	}
 
+	// The serving gate refuses non-APPROVED models, so promoting one
+	// would schedule an outage for the next restart. Enforce the same
+	// governance gate here, with the same audited override.
+	status := ""
+	if m.ValidationStatus != nil {
+		status = m.ValidationStatus.Status
+	}
+	if status != "APPROVED" && !config.AllowUnapprovedModel() {
+		rationale := "no validation status recorded"
+		if m.ValidationStatus != nil {
+			rationale = m.ValidationStatus.Rationale
+		}
+		return "", fmt.Errorf(
+			"challenger %s validation status is %q, not APPROVED: %s "+
+				"(the serving gate would refuse it; set ALLOW_UNAPPROVED_MODEL=true "+
+				"to promote under documented sign-off)", version, status, rationale)
+	}
+
 	versionsDir := filepath.Join(modelsDir, "versions")
 	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
 		return "", err
@@ -152,6 +170,12 @@ func copyFile(src, dst string) error {
 
 func RunPromote() {
 	config.LoadEnv()
+	release, err := acquireModelsLock()
+	if err != nil {
+		slog.Error("promotion failed", "error", err)
+		os.Exit(1)
+	}
+	defer release()
 	version, err := promoteChallenger(config.ModelsDir())
 	if err != nil {
 		slog.Error("promotion failed", "error", err)

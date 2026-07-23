@@ -2,8 +2,11 @@ package inference
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,8 +84,15 @@ func TestAuthMiddleware(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rec.Code)
 		}
-		if gotClient != "key:secret" {
-			t.Errorf("clientID = %q, want key:secret", gotClient)
+		// The limiter identity is a digest of the key — the raw
+		// credential must never appear in limiter state or logs.
+		sum := sha256.Sum256([]byte("secret"))
+		want := "key:" + hex.EncodeToString(sum[:4])
+		if gotClient != want {
+			t.Errorf("clientID = %q, want %q", gotClient, want)
+		}
+		if strings.Contains(gotClient, "secret") {
+			t.Errorf("clientID %q leaks the raw API key", gotClient)
 		}
 	})
 }

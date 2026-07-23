@@ -2,7 +2,9 @@ package inference
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"log/slog"
 	"net"
 	"net/http"
@@ -195,11 +197,14 @@ func (s *server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// clientID identifies the caller for rate limiting: the authenticated
-// API key when present, otherwise the client IP.
+// clientID identifies the caller for rate limiting: a short digest of
+// the authenticated API key when present, otherwise the client IP. The
+// digest — never the key itself — is what reaches limiter state and
+// log lines, so a 429 cannot leak a live credential into access logs.
 func clientID(r *http.Request, trustForwarded bool) string {
 	if k, ok := r.Context().Value(clientKey).(string); ok && k != "" {
-		return "key:" + k
+		sum := sha256.Sum256([]byte(k))
+		return "key:" + hex.EncodeToString(sum[:4])
 	}
 	return "ip:" + clientIP(r, trustForwarded)
 }

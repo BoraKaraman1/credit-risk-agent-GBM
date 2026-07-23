@@ -217,19 +217,22 @@ func TestHandleHealth(t *testing.T) {
 			t.Errorf("status = %d, want 503", rec.Code)
 		}
 	})
-	t.Run("200 with model info", func(t *testing.T) {
+	t.Run("degraded without a feature store", func(t *testing.T) {
+		// A loaded model with no DATABASE_URL cannot score, so health
+		// must not answer 200 — a load balancer would route to it.
 		s := &server{model: syntheticAPIModel(), modelLoadedAt: "2026-01-01T00:00:00Z"}
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		rec := httptest.NewRecorder()
 		s.handleHealth(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d", rec.Code)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rec.Code)
 		}
 		var resp healthResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatal(err)
 		}
-		if resp.ModelVersion != "vtest" || resp.NFeatures != 2 || resp.Status != "ok" {
+		if resp.ModelVersion != "vtest" || resp.NFeatures != 2 ||
+			resp.Status != "degraded" || resp.Database != "not_configured" {
 			t.Errorf("resp = %+v", resp)
 		}
 	})

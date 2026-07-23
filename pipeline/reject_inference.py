@@ -22,7 +22,8 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
 from datetime import datetime, timezone
 
-from pipeline import config
+from pipeline import calibrate, config, fairness
+from pipeline.export_model_json import export_model
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,10 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
     X_all = pd.concat([X_combined, X_val], ignore_index=True)
     y_all = pd.concat([y_combined, y_val], ignore_index=True)
     weights_all = np.concatenate([sample_weights, np.ones(len(X_val))])
+    # Same Kamiran-Calders reweighing as the champion recipe, composed
+    # with the pseudo-label uncertainty weights, so the augmented
+    # challenger faces the same fairness bar as any champion candidate.
+    weights_all = weights_all * fairness.reweigh_weights(X_all, y_all)
     val_fraction = len(X_val) / len(X_all)
 
     X_fit, X_es, y_fit, y_es, w_fit, _ = train_test_split(
@@ -170,7 +175,8 @@ def train_augmented_model(X_accepted, y_accepted, X_rejected, y_rejected,
     )
     logger.info(f"Augmented model iterations: {model.best_iteration_}")
 
-    return model
+    # The carve-out is returned for calibration (it never saw gradients).
+    return model, X_es, y_es
 
 
 def compare_models(champion, augmented, X_test, y_test, feature_cols):
@@ -221,9 +227,8 @@ def save_augmented_model(model, feature_cols, metrics, comparison):
 
     joblib.dump(model, dest / "model.joblib")
 
-    # Remove any stale calibrator from a previous challenger: this path
-    # does not fit one, and the JSON exporter would otherwise embed a
-    # calibrator fit on a different model.
+    # Remove any stale calibrator from a previous challenger before the
+    # new one (fit right after this save) replaces it.
     (dest / "calibrator.joblib").unlink(missing_ok=True)
 
     # Determine version
@@ -290,7 +295,7 @@ def run():
     # Step 3: Train augmented model
     logger.info("Step 3: Training augmented model ...")
     with mlflow.start_run():
-        augmented_model = train_augmented_model(
+        augmented_model, X_es, y_es = train_augmented_model(
             X_train, y_train,
             rejected_aligned[feature_cols], rejected_aligned["default"],
             X_val, y_val,
@@ -320,17 +325,32 @@ def run():
         mlflow.log_metric("psi_vs_champion", comparison["psi_between_models"])
         mlflow.sklearn.log_model(augmented_model, "model")
 
-        # Step 5: Save as challenger
+        # Step 5: Save as challenger, then calibrate and record fairness
+        # on calibrated PDs — the same governance bar as the champion
+        # path, so the promote gate (APPROVED only) is reachable.
         version = save_augmented_model(
             augmented_model, feature_cols, aug_metrics, comparison
         )
+        calibrator, cal_report = calibrate.calibrate_model(
+            augmented_model, X_es, y_es, X_test, y_test)
+        calibrate.save_calibration(config.challenger_dir(), calibrator, cal_report)
+        ri_fairness = fairness.summarize(fairness.run(
+            model=augmented_model, X_test=X_test, y_test=y_test,
+            calibrator=calibrator))
+        fairness.save_fairness(config.challenger_dir(), ri_fairness)
+        export_model(config.challenger_dir())
         mlflow.log_param("model_version", version)
 
     # Recommendation
     auc_delta = comparison["auc_delta"]
     psi = comparison["psi_between_models"]
+    violations = [f"{attr}/{group}"
+                  for attr, ar in ri_fairness["attributes"].items()
+                  for group in ar["violations"]]
     logger.info("=" * 55)
-    if auc_delta > 0 and psi < 0.25:
+    if violations:
+        logger.info(f"RECOMMENDATION: Do not promote (DIR violations: {', '.join(violations)})")
+    elif auc_delta > 0 and psi < 0.25:
         logger.info(f"RECOMMENDATION: Promote augmented model (AUC +{auc_delta:.4f}, PSI {psi:.4f})")
     elif auc_delta > 0 and psi >= 0.25:
         logger.info(f"CAUTION: AUC improved (+{auc_delta:.4f}) but high PSI ({psi:.4f}). "

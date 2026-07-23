@@ -52,6 +52,19 @@ func (d *DB) InsertDriftLog(ctx context.Context, metricName string, metricValue 
 	return err
 }
 
+// PruneScoringLog deletes scoring_log rows older than the retention
+// window. Retention exists because every row carries a full feature
+// snapshot (applicant PII proxies) that must not accumulate forever.
+func (d *DB) PruneScoringLog(ctx context.Context, retentionDays int) (int64, error) {
+	tag, err := d.Pool.Exec(ctx, `
+		DELETE FROM scoring_log
+		WHERE scored_at < NOW() - make_interval(days => $1)`, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // HasDriftLogEntry reports whether drift_log already holds a row for
 // this metric and model version (used for idempotent one-row-per-version
 // publishes like the fairness summary sync).

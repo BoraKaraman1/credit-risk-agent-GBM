@@ -8,6 +8,7 @@
 //	gbm promote           atomically promote challenger to champion
 //	gbm backfill          mature scoring_log outcomes from Gold labels
 //	gbm sync              bulk feature-store upsert
+//	gbm prune             delete scoring_log rows past retention
 package main
 
 import (
@@ -31,6 +32,7 @@ commands:
   promote            atomically promote the challenger to champion
   backfill           backfill scoring_log outcomes from Gold labels
   sync               sync Gold features to the feature store
+  prune              delete scoring_log rows older than the retention window
 `)
 }
 
@@ -58,6 +60,8 @@ func main() {
 		monitoring.RunBackfill()
 	case "sync":
 		monitoring.RunSync()
+	case "prune":
+		monitoring.RunPrune()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 		usage()

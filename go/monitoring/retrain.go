@@ -338,6 +338,12 @@ func sameFeatures(a, b []string) bool {
 
 func RunRetrain(reason string) {
 	config.LoadEnv()
+	release, err := acquireModelsLock()
+	if err != nil {
+		slog.Error("retrain orchestrator failed", "error", err)
+		os.Exit(1)
+	}
+	defer release()
 	rep, err := runRetrain(context.Background(), reason)
 	if err != nil {
 		slog.Error("retrain orchestrator failed", "error", err)

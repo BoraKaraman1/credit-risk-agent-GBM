@@ -404,11 +404,15 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 		actions = computeAdverseActions(m, x, feat.Features)
 	}
 
-	// Audit log; failures are logged but never block the decision.
+	// The scoring_log row is the ECOA/Reg B compliance artifact: a
+	// decision that cannot be recorded is not rendered. Fail closed —
+	// the caller gets a retryable 503, never an unaudited decision.
 	logCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := d.InsertScoringLog(logCtx, applicantID, m.Version, feat.Features, score, decision); err != nil {
-		logger(ctx).Warn("failed to log scoring decision", "error", err)
+		logger(ctx).Error("audit write failed; decision withheld", "error", err)
+		return nil, &httpError{http.StatusServiceUnavailable,
+			"decision could not be audit-logged; retry"}
 	}
 
 	return &scoreResponse{
@@ -546,10 +550,13 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Calibrated:    m.Calibration != nil,
 		Database:      "not_configured",
 	}
-	// Readiness includes the feature store: a healthy model with an
-	// unreachable database cannot actually score, so report it degraded.
+	// Readiness includes the feature store: a healthy model with a
+	// missing or unreachable database cannot actually score, so never
+	// answer 200 unless a /score could succeed.
 	status := http.StatusOK
-	if config.DatabaseURL() != "" {
+	if config.DatabaseURL() == "" {
+		resp.Database, resp.Status, status = "not_configured", "degraded", http.StatusServiceUnavailable
+	} else {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if d, err := s.getDB(ctx); err != nil {
@@ -591,6 +598,22 @@ func Serve() {
 	if err := s.loadModel(); err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
+	}
+	// Fail fast on the feature store too: pgxpool connects lazily, so
+	// without this probe a misconfigured instance would pass its health
+	// check while every /score request fails.
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		d, err := db.Connect(ctx, config.DatabaseURL())
+		if err == nil {
+			err = d.Ping(ctx)
+		}
+		cancel()
+		if err != nil {
+			slog.Error("startup failed: feature store unreachable", "error", err)
+			os.Exit(1)
+		}
+		s.db = d
 	}
 	// Fail closed: refuse to start unauthenticated unless explicitly
 	// allowed for local development.

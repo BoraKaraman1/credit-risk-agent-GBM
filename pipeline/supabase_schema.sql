@@ -18,7 +18,12 @@ CREATE INDEX IF NOT EXISTS ix_applicant_features_computed
 CREATE INDEX IF NOT EXISTS ix_applicant_features_fico
     ON applicant_features (fico_score);
 
--- Decision log: every scoring decision (for monitoring + retraining)
+-- Decision log: every scoring decision (for monitoring + retraining).
+-- This is the ECOA/Reg B compliance artifact: the API fails closed if a
+-- row cannot be written. feature_snapshot carries applicant-level data,
+-- so retention is bounded: `gbm prune` (weekly monitoring DAG) deletes
+-- rows older than SCORING_LOG_RETENTION_DAYS (default 750 days, i.e.
+-- Reg B's 25-month record-retention requirement with margin).
 CREATE TABLE IF NOT EXISTS scoring_log (
     id                  BIGSERIAL PRIMARY KEY,
     applicant_id        TEXT NOT NULL,

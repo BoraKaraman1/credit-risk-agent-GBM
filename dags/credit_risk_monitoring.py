@@ -65,6 +65,18 @@ def _run_drift_monitor(**kwargs):
     return report
 
 
+def _run_prune(**kwargs):
+    """Enforce scoring_log retention (Reg B window, default 750 days).
+    Tolerant of a missing database, like the backfill."""
+    try:
+        report = _run_go("prune")
+        logger.info("scoring_log prune: %s", report)
+        return report
+    except (subprocess.CalledProcessError, ValueError) as e:
+        logger.warning("scoring_log prune skipped: %s", e)
+        return None
+
+
 def _run_performance_monitor(**kwargs):
     report = _run_go("performance")
     kwargs["ti"].xcom_push(key="perf_report", value=report)
@@ -145,10 +157,14 @@ with DAG(
         # Runs after whichever branch executed (the other is skipped).
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
+    prune = PythonOperator(task_id="scoring_log_prune", python_callable=_run_prune)
 
     # Backfill matures outcomes before the performance monitor reads them;
     # drift runs in parallel (it uses scores, not outcomes). Then decide
     # whether to retrain, and close the run with the advisory LLM memo.
+    # Retention pruning runs after backfill so it never races outcome
+    # writes on the rows it deletes.
     backfill >> perf
+    backfill >> prune
     [drift, perf] >> decide >> [retrain, skip]
     [retrain, skip] >> review

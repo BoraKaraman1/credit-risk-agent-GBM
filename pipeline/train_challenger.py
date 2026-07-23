@@ -74,16 +74,24 @@ def main(version):
 
     # Fairness for both models on the same test set: the orchestrator
     # gates promotion on the challenger relative to the champion, so it
-    # needs both summaries (fairness lives only in Python).
+    # needs both summaries (fairness lives only in Python). Both run on
+    # calibrated PDs — the approval sets production will actually see —
+    # never on raw scores.
     challenger_fairness = fairness.summarize(
-        fairness.run(model=model, X_test=X_test, y_test=y_test, raw_score=test_scores))
+        fairness.run(model=model, X_test=X_test, y_test=y_test,
+                     calibrator=calibrator, raw_score=test_scores))
     fairness.save_fairness(config.challenger_dir(), challenger_fairness)
 
     champion_fairness = None
     if config.metadata_path(config.champion_dir()).exists():
         champion_model = joblib.load(config.model_path(config.champion_dir()))
+        champion_calibrator = None
+        champion_cal_path = config.champion_dir() / "calibrator.joblib"
+        if champion_cal_path.exists():
+            champion_calibrator = joblib.load(champion_cal_path)
         champion_fairness = fairness.summarize(
-            fairness.run(model=champion_model, X_test=X_test, y_test=y_test))
+            fairness.run(model=champion_model, X_test=X_test, y_test=y_test,
+                         calibrator=champion_calibrator))
 
     export_model(config.challenger_dir())
 

@@ -48,6 +48,43 @@ func writeMinimalModel(t *testing.T, dir, version string) {
 	}
 }
 
+func TestPromoteRefusesUnapproved(t *testing.T) {
+	modelsDir := t.TempDir()
+	challenger := filepath.Join(modelsDir, "challenger")
+	writeMinimalModel(t, challenger, "v9.9")
+
+	// Rewrite the challenger's verdict to REVIEW REQUIRED.
+	raw, err := os.ReadFile(filepath.Join(challenger, "model.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["validation_status"] = map[string]string{
+		"status": "REVIEW REQUIRED", "rationale": "DIR violations"}
+	b, _ := json.Marshal(payload)
+	if err := os.WriteFile(filepath.Join(challenger, "model.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := promoteChallenger(modelsDir); err == nil {
+		t.Fatal("promote should refuse a REVIEW REQUIRED challenger")
+	}
+
+	t.Run("audited override allows it", func(t *testing.T) {
+		t.Setenv("ALLOW_UNAPPROVED_MODEL", "true")
+		version, err := promoteChallenger(modelsDir)
+		if err != nil {
+			t.Fatalf("override should allow promotion: %v", err)
+		}
+		if version != "v9.9" {
+			t.Errorf("version = %q, want v9.9", version)
+		}
+	})
+}
+
 func TestPromoteChallenger(t *testing.T) {
 	modelsDir := t.TempDir()
 	writeMinimalModel(t, filepath.Join(modelsDir, "challenger"), "v1.3")
