@@ -52,7 +52,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -c requirements/constraints.txt -r requirements/test.txt ruff
       - name: ruff
-        run: ruff check pipeline tests dags
+        run: ruff check pipeline tests dags ui agents
       - name: pytest
         run: python -m pytest tests/ -q
       - name: pip-audit
@@ -83,16 +83,35 @@ jobs:
         run: python -m pytest tests/test_dags.py -q
 
   docker:
-    name: Docker build (${{ matrix.dockerfile }})
+    name: Docker build + smoke (${{ matrix.dockerfile }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        dockerfile:
-          - Dockerfile.api
-          - Dockerfile.pipeline
-          - Dockerfile.test
-          - Dockerfile.airflow
+        # Every image is built AND run: a build proves the Dockerfile
+        # parses, only the smoke proves the image works (a missing file
+        # or broken import fails here, not at deploy time). None of the
+        # smokes need data/ (absent from CI checkouts).
+        include:
+          - dockerfile: Dockerfile.api
+            # gbm with no args prints usage and exits 2 — proves the
+            # binary executes on the runtime base image.
+            smoke: docker run --rm --entrypoint sh smoke-image -c 'gbm; [ $? -eq 2 ]'
+          - dockerfile: Dockerfile.pipeline
+            # Imports exercise the eager contract.json load and the full
+            # scientific-stack import chain.
+            smoke: docker run --rm smoke-image python -c "import pipeline.train, pipeline.export_model_json, pipeline.reject_inference"
+          - dockerfile: Dockerfile.test
+            # The image's own CMD: the entire pytest suite, in-image.
+            smoke: docker run --rm smoke-image
+          - dockerfile: Dockerfile.airflow
+            # Importing the DAG modules parses both DAGs under the real
+            # Airflow install (PYTHONPATH=/opt/airflow in the image).
+            smoke: docker run --rm --entrypoint python smoke-image -c "import pipeline.config, agents.review_agent, dags.credit_risk_pipeline, dags.credit_risk_monitoring"
+          - dockerfile: Dockerfile.ui
+            # ui.core loads the contract; never import ui.app (it runs
+            # streamlit navigation at import).
+            smoke: docker run --rm smoke-image python -c "from ui import core, services"
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -101,8 +120,15 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           push: false
+          # load + tag so the smoke step can docker-run the image (the
+          # buildx container driver does not expose it to the daemon
+          # otherwise).
+          load: true
+          tags: smoke-image
           cache-from: type=gha,scope=${{ matrix.dockerfile }}
           cache-to: type=gha,mode=max,scope=${{ matrix.dockerfile }}
+      - name: Smoke run
+        run: ${{ matrix.smoke }}
 
   secrets:
     name: Secret scan (gitleaks)

@@ -19,6 +19,9 @@ RUN pip install --upgrade pip \
     && pip install -c requirements/constraints.txt -r requirements/pipeline.txt
 
 COPY pipeline/ ./pipeline/
+# Cross-language threshold contract, loaded eagerly by pipeline/config.py
+# at import; same relative path as in the repo.
+COPY go/shared/config/contract.json go/shared/config/contract.json
 
 USER app
 

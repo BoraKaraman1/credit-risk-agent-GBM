@@ -18,6 +18,14 @@ RUN pip install --upgrade pip \
 
 COPY pipeline/ ./pipeline/
 COPY tests/ ./tests/
+# The suite also covers the UI helpers, DAG integrity (AST layer), and
+# the review agent's deterministic plumbing, and pipeline/config.py +
+# ui/core.py load the cross-language contract at import.
+COPY ui/ ./ui/
+COPY dags/ ./dags/
+COPY agents/ ./agents/
+COPY pytest.ini ./
+COPY go/shared/config/contract.json go/shared/config/contract.json
 
 USER app
 
