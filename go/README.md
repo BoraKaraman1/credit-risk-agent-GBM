@@ -38,9 +38,14 @@ gold-dataset I/O used across both).
 - **Retention.** `gbm prune` enforces `SCORING_LOG_RETENTION_DAYS`
   (default 750 days, covering Reg B's 25-month requirement with margin)
   so the audit table cannot grow without bound.
-- **Atomic promotion.** `promote` publishes an immutable
+- **Atomic promotion, single door.** `promote` publishes an immutable
   `models/versions/<v>` directory and repoints the `champion` symlink via
-  rename; serving hot-reloads on `POST /reload`.
+  rename — it is the only writer of `models/champion` (the Python
+  pipeline always produces challengers and refuses to write through the
+  symlink). When `SCORING_API_URL` is set, promote then POSTs
+  `/reload` so serving picks up the new champion immediately
+  (best-effort: a failed reload is loudly logged, never a failed
+  promotion).
 - **Stable applicant identity.** Feature-store IDs are keyed on the loan
   ID (`LC_<loan_id>`), never on parquet row position, so regenerating the
   Gold test set cannot re-point applicants or corrupt backfilled labels.
@@ -73,18 +78,23 @@ Tree structure is validated at load (child indexes must exceed their
 parent, proving acyclicity), so a malformed export fails fast instead of
 hanging a traversal.
 
-Re-export whenever the champion changes (the retrain flow exports the
-challenger automatically):
+The retrain flow exports the challenger automatically; a manually
+trained challenger is exported with:
 
 ```bash
-.venv/bin/python pipeline/export_model_json.py            # champion
-.venv/bin/python pipeline/export_model_json.py data/models/challenger
+.venv/bin/python pipeline/export_model_json.py            # challenger (default)
 ```
+
+A promoted champion's `model.json` is published by `gbm promote` and is
+immutable — the exporter refuses to write through the champion symlink.
 
 ## Running
 
 All binaries read `.env` (`DATABASE_URL`) and expect to run from the
 repository root (or set `CREDIT_RISK_DATA_DIR` / `CREDIT_RISK_MODELS_DIR`).
+`SCORING_API_URL` (optional) is the running API's base URL; when set,
+`gbm promote` POSTs `/reload` after the champion swap, authenticating
+with the first key in `API_KEYS`.
 The scoring API requires `API_KEYS` (comma-separated); it refuses to
 start unauthenticated unless `ALLOW_UNAUTHENTICATED_DEV=true` is set for
 local development. `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` tune the

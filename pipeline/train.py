@@ -1,7 +1,10 @@
 """
 Training Pipeline
-Trains a gradient boosting model on Gold features, logs to MLflow, manages champion/challenger.
-Uses LightGBM (industry-standard GBM; requires OpenMP — `brew install libomp` on macOS).
+Trains a gradient boosting model on Gold features, logs to MLflow, and
+saves it as the challenger. The champion is only ever created by
+`gbm promote` (single promotion door): review the generated model card,
+then promote. Uses LightGBM (industry-standard GBM; requires OpenMP —
+`brew install libomp` on macOS).
 """
 
 import json
@@ -20,7 +23,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import calibrate, config, fairness, model_card
+from pipeline import calibrate, config, fairness, io_utils, model_card
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,7 @@ def evaluate_model(model, X, y, split_name="test", y_score=None):
 
 def save_model(model, feature_cols, metrics, version, dest_dir, params=None):
     """Save model and metadata JSON."""
+    config.assert_mutable_model_dir(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = dest_dir / "model.joblib"
@@ -144,8 +148,9 @@ def save_model(model, feature_cols, metrics, version, dest_dir, params=None):
     return model_path
 
 
-def run(as_challenger=False):
-    """Full training pipeline with MLflow logging."""
+def run():
+    """Full training pipeline with MLflow logging. Always produces a
+    challenger; promotion to champion is a separate, gated step."""
     mlflow.set_tracking_uri(str(MODELS_DIR / "mlruns"))
     mlflow.set_experiment("credit_risk_gbm")
 
@@ -189,34 +194,21 @@ def run(as_challenger=False):
         # Log model
         mlflow.sklearn.log_model(model, "model")
 
-        # Determine version
-        champion_meta = config.metadata_path(config.champion_dir())
-        if champion_meta.exists():
-            with open(champion_meta) as f:
-                prev = json.load(f)
-            prev_version = prev.get("version", "v1.0")
-            major, minor = prev_version.lstrip("v").split(".")
-            version = f"v{major}.{int(minor) + 1}"
-        else:
-            version = "v1.0"
-
-        # Save as challenger or champion
-        dest = config.challenger_dir() if as_challenger else config.champion_dir()
+        version = config.next_version()
+        dest = config.challenger_dir()
 
         all_metrics = {
             "train": train_metrics,
             "early_stopping": early_stopping_metrics,
             "test": test_metrics,
         }
-        save_model(model, feature_cols, all_metrics, version, dest, params=params)
         mlflow.log_param("model_version", version)
-        mlflow.log_param("role", "challenger" if as_challenger else "champion")
+        mlflow.log_param("role", "challenger")
 
         # Calibrate on the early-stopping carve-out (never gradient-fitted)
         logger.info("Fitting isotonic calibrator ...")
         calibrator, cal_report = calibrate.calibrate_model(
             model, X_es, y_es, X_test, y_test, raw_test=test_scores)
-        calibrate.save_calibration(dest, calibrator, cal_report)
         mlflow.log_metric("test_brier_raw", cal_report["brier_raw"])
         mlflow.log_metric("test_brier_calibrated", cal_report["brier_calibrated"])
 
@@ -226,13 +218,19 @@ def run(as_challenger=False):
         fair_summary = fairness.summarize(
             fairness.run(model=model, X_test=X_test, y_test=y_test,
                          calibrator=calibrator, raw_score=test_scores))
-        fairness.save_fairness(dest, fair_summary)
 
-    # Validation report (champion only): a markdown model card for MRM.
-    if not as_challenger:
-        model_card.generate(dest)
+        # Registry mutation under the cross-language flock (computation
+        # above stays outside so training never blocks retrain/promote).
+        # The model card ships with the model; `gbm promote` copies it
+        # into the immutable version dir alongside model.json.
+        with io_utils.registry_lock():
+            save_model(model, feature_cols, all_metrics, version, dest, params=params)
+            calibrate.save_calibration(dest, calibrator, cal_report)
+            fairness.save_fairness(dest, fair_summary)
+            model_card.generate(dest, dest / "model_card.md")
 
-    logger.info(f"Done. Model {version} saved as {'challenger' if as_challenger else 'champion'}.")
+    logger.info(f"Done. Model {version} saved as challenger; review its "
+                "model card and run `gbm promote` to make it champion.")
     return model, all_metrics
 
 

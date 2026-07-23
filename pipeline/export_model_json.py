@@ -7,7 +7,9 @@ sklearn-style semantics (value <= threshold goes left, NaN follows
 missing_go_to_left), so the Go runtime is model-library agnostic.
 
 Usage:
-    python pipeline/export_model_json.py [model_dir]   # default: data/models/champion
+    python pipeline/export_model_json.py [model_dir]   # default: data/models/challenger
+(A promoted champion is immutable; its model.json was published by
+`gbm promote`. Export the challenger, then promote.)
 """
 
 import json
@@ -21,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import config
+from pipeline import config, io_utils
 from pipeline.calibrate import scorecard_params
 from pipeline.model_card import _validation_status
 
@@ -89,6 +91,7 @@ def _leaf_value_for_row(tree, row):
 
 
 def export_model(model_dir):
+    config.assert_mutable_model_dir(model_dir)
     model_dir = Path(model_dir)
     model = joblib.load(config.model_path(model_dir))
     with open(config.metadata_path(model_dir)) as f:
@@ -182,5 +185,6 @@ if __name__ == "__main__":
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    target = sys.argv[1] if len(sys.argv) > 1 else config.champion_dir()
-    export_model(target)
+    target = sys.argv[1] if len(sys.argv) > 1 else config.challenger_dir()
+    with io_utils.registry_lock():
+        export_model(target)

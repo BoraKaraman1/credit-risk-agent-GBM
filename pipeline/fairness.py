@@ -309,6 +309,7 @@ def summarize(report: dict) -> dict:
 
 def save_fairness(model_dir, summary: dict) -> None:
     """Record the fairness summary in the model's model_metadata.json."""
+    config.assert_mutable_model_dir(model_dir)
     meta_path = config.metadata_path(model_dir)
     with open(meta_path) as f:
         meta = json.load(f)

@@ -16,8 +16,9 @@ def _status_banner(pres: dict, prefix: str = ""):
 
 def _model_card_tab(metadata, card):
     if metadata is None and card is None:
-        st.info("No champion artifacts found. Train a champion "
-                "(pipeline/train.py) and mount data/models + docs into the UI.", icon="📭")
+        st.info("No champion artifacts found. Train a challenger "
+                "(pipeline/train.py), promote it (gbm promote), and mount "
+                "data/models into the UI.", icon="📭")
         return
 
     if metadata:
@@ -52,7 +53,8 @@ def _model_card_tab(metadata, card):
         _status_banner(pres, prefix="Governance verdict (model card): ")
         st.markdown(card)
     elif metadata:
-        st.caption("docs/model_card.md not mounted; showing metadata only.")
+        st.caption("Champion model_card.md not found (MODEL_CARD_PATH); "
+                   "showing metadata only.")
 
 
 def _calibration_tab(metadata):

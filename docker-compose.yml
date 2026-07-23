@@ -33,11 +33,14 @@ services:
       # otherwise). Override with your own keys via a .env file
       # (API_KEYS=key1,key2); never ship this demo key to production.
       API_KEYS: ${API_KEYS:-demo-local-key}
-      # The bundled demo champion is REVIEW REQUIRED — structural
-      # disparities in the public LendingClub data (see docs/model_card.md).
-      # The governance gate therefore fails closed by default; to run the
-      # demo you must explicitly accept serving an unapproved model, e.g.:
+      # The first (bootstrap) champion is REVIEW REQUIRED — structural
+      # disparities in the public LendingClub data (see the champion's
+      # model_card.md). The governance gate therefore fails closed by
+      # default; to run the demo you must explicitly accept serving an
+      # unapproved model, e.g.:
       #   ALLOW_UNAPPROVED_MODEL=true docker compose up
+      # After the first promotion, challenger exports are judged
+      # champion-relative and can be APPROVED, making this unnecessary.
       ALLOW_UNAPPROVED_MODEL: ${ALLOW_UNAPPROVED_MODEL:-}
     ports:
       - "8000:8000"
@@ -63,11 +66,14 @@ services:
       # override API_KEYS, also set UI_API_KEY to one of those keys.
       API_KEY: ${UI_API_KEY:-demo-local-key}
       DATABASE_URL: postgresql://${POSTGRES_USER:-credit_risk}:${POSTGRES_PASSWORD:-credit_risk}@postgres:5432/${POSTGRES_DB:-credit_risk}
-    # Governance page reads the published champion artifacts and the
-    # generated model card read-only (WORKDIR is /app).
+      # The model card ships inside the champion model directory
+      # (promoted there by gbm promote), so the governance page always
+      # shows the card of the model actually being served.
+      MODEL_CARD_PATH: data/models/champion/model_card.md
+    # Governance page reads the published champion artifacts read-only
+    # (WORKDIR is /app).
     volumes:
       - ./data/models:/app/data/models:ro
-      - ./docs:/app/docs:ro
     ports:
       - "8501:8501"
     depends_on:
@@ -86,6 +92,11 @@ services:
       # Used by the gbm tasks (sync, monitors) the DAGs shell out to.
       DATABASE_URL: postgresql://${POSTGRES_USER:-credit_risk}:${POSTGRES_PASSWORD:-credit_risk}@postgres:5432/${POSTGRES_DB:-credit_risk}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # For `docker compose exec airflow gbm promote`: after the swap,
+      # promote POSTs /reload to the API so serving picks up the new
+      # champion. The key must be one of the api service's API_KEYS.
+      SCORING_API_URL: http://api:8000
+      API_KEYS: ${API_KEYS:-demo-local-key}
     ports:
       - "8080:8080"
     volumes:

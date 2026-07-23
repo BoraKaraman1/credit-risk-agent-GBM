@@ -11,7 +11,7 @@ import json
 import pandas as pd
 import pytest
 
-from pipeline.io_utils import atomic_write_json, atomic_write_parquet
+from pipeline.io_utils import atomic_write_json, atomic_write_parquet, registry_lock
 
 
 def test_atomic_write_parquet_roundtrip(tmp_path):
@@ -67,3 +67,34 @@ def test_atomic_write_json_roundtrip(tmp_path):
     atomic_write_json(payload, dest)
     assert json.loads(dest.read_text()) == payload
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# --- Registry lock (shared with go/monitoring/lock.go via flock) ---
+
+def test_registry_lock_excludes_second_holder(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path / "models"))
+    with registry_lock():
+        assert (tmp_path / "models" / ".registry.lock").exists()
+        # flock conflicts across open file descriptions, so a nested
+        # acquire in the same process exercises the same exclusion a
+        # concurrent gbm retrain/promote would hit.
+        with pytest.raises(RuntimeError, match="another retrain/promote"):
+            with registry_lock():
+                pass
+
+
+def test_registry_lock_releases_on_exit(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path / "models"))
+    with registry_lock():
+        pass
+    with registry_lock():  # reacquirable after clean release
+        pass
+
+
+def test_registry_lock_releases_on_exception(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path / "models"))
+    with pytest.raises(ValueError):
+        with registry_lock():
+            raise ValueError("boom")
+    with registry_lock():  # lock not leaked by the failure
+        pass

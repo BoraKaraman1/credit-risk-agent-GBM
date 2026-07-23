@@ -179,16 +179,23 @@ python pipeline/silver_transform.py
 # 3. Engineer features, time-aware split → Gold
 python pipeline/gold_features.py
 
-# 4. Train champion model
+# 4. Train a challenger (writes data/models/challenger + its model card)
 python pipeline/train.py
 
-# 5. Export the champion for the Go runtime
+# 5. Export the challenger for the Go runtime
 python pipeline/export_model_json.py
 
-# 6. Sync features to Supabase (Go)
+# 6. Review the challenger's model card, then promote — the ONLY door
+#    to champion/. The public LendingClub data carries structural
+#    disparities, so the first (bootstrap) champion is REVIEW REQUIRED
+#    and needs the audited override; once a champion exists, later
+#    challengers are judged champion-relative and can be APPROVED.
+ALLOW_UNAPPROVED_MODEL=true ./go/bin/gbm promote
+
+# 7. Sync features to Supabase (Go)
 ./go/bin/gbm sync
 
-# 7. (Optional) Run reject inference
+# 8. (Optional) Run reject inference
 python pipeline/reject_inference.py
 ```
 
@@ -219,7 +226,8 @@ curl http://localhost:8000/health
 # Prometheus metrics (authenticated; X-API-Key or Bearer token)
 curl http://localhost:8000/metrics -H "X-API-Key: your-key"
 
-# Hot-reload model (after re-running pipeline/export_model_json.py)
+# Hot-reload model (gbm promote calls this automatically when
+# SCORING_API_URL is set; manual fallback below)
 curl -X POST http://localhost:8000/reload -H "X-API-Key: your-key"
 ```
 
@@ -359,12 +367,16 @@ Two DAGs automate the pipeline end-to-end:
 Runs the full medallion pipeline with optional reject inference:
 
 ```
-bronze_ingest → silver_transform → gold_features → train_model → export_model_json → sync_to_supabase
-                                                  ↘ fairness_analysis
-                                                  ↘ decide_reject_inference → [reject_inference | skip]
+bronze_ingest → silver_transform → gold_features → train_challenger → export_model_json → sync_to_supabase
+                                                  ↘ fairness_analysis  ↘ decide_reject_inference → [reject_inference | skip]
 ```
 
-Training tasks run in-process (Python); `export_model_json` dumps the new champion for the Go runtime, and `sync_to_supabase` shells out to the Go binary.
+Training tasks run in-process (Python) and produce a **gated
+challenger** with its model card; the champion is never written by the
+DAG. Promotion stays a human step (`gbm promote`), which atomically
+publishes the version and tells the API to reload. `export_model_json`
+dumps the challenger for the Go runtime, and `sync_to_supabase` shells
+out to the Go binary.
 
 Reject inference is disabled by default. Enable via DAG config:
 ```json
@@ -425,10 +437,10 @@ The retrain orchestrator will not recommend PROMOTE on accuracy alone. It comput
 
 ## Model Card
 
-Each champion training run regenerates a markdown validation report at [`docs/model_card.md`](docs/model_card.md): version and data window, discrimination metrics, calibration (Brier and reliability), scorecard parameters, the full fairness breakdown, hyperparameters, and an overall validation status. This is the artifact a model risk management team reviews.
+Every training run writes a markdown validation report next to the model itself (`data/models/<role>/model_card.md`): version and data window, discrimination metrics, calibration (Brier and reliability), scorecard parameters, the full fairness breakdown, hyperparameters, and an overall validation status. This is the artifact a model risk management team reviews **before promotion**; `gbm promote` carries the reviewed card into the immutable version directory, so the served champion always ships with the card that approved it. [`docs/model_card.md`](docs/model_card.md) is a committed snapshot for browsing the repo.
 
 ```bash
-# Regenerate from an existing model without retraining
+# Regenerate the repo snapshot from an existing model without retraining
 python pipeline/model_card.py data/models/champion docs/model_card.md
 ```
 
@@ -488,11 +500,11 @@ docker run --rm \
   credit-risk-api
 ```
 
-The API image runs as a non-root user and exposes `/health` as its Docker healthcheck. It expects an exported champion at `${CREDIT_RISK_MODELS_DIR}/champion/model.json` (run `pipeline/export_model_json.py` after training).
+The API image runs as a non-root user and exposes `/health` as its Docker healthcheck. It expects a champion at `${CREDIT_RISK_MODELS_DIR}/champion/model.json`, created by promoting an exported challenger (`gbm promote`).
 
 ### Local Compose Stack
 
-Start local Postgres, initialize `pipeline/supabase_schema.sql`, and run the API against the mounted local champion model. The bundled demo champion is `REVIEW REQUIRED` (structural disparities in the public LendingClub data), so the governance gate fails closed by default; explicitly accept serving an unapproved model to run the demo:
+Start local Postgres, initialize `pipeline/supabase_schema.sql`, and run the API against the mounted local champion model. The first (bootstrap) champion is `REVIEW REQUIRED` (structural disparities in the public LendingClub data), so the governance gate fails closed by default; explicitly accept serving an unapproved model to run the demo. Once a champion exists, challenger exports are judged champion-relative and can be `APPROVED`, after which the override is unnecessary:
 
 ```bash
 ALLOW_UNAPPROVED_MODEL=true docker compose up --build postgres api

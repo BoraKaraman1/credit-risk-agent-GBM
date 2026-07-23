@@ -216,8 +216,8 @@ func runRetrain(ctx context.Context, reason string) (*retrainReport, error) {
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Reason:    reason,
 		ActionRequired: "Human review required before promoting challenger to champion (SR 11-7); " +
-			"the challenger model card must be APPROVED (see docs/model_card.md) or the serving " +
-			"gate will refuse it.",
+			"the challenger model card must be APPROVED (see the challenger's model_card.md, " +
+			"e.g. data/models/challenger/model_card.md) or the serving gate will refuse it.",
 		// `gbm promote` publishes the challenger as an immutable versioned
 		// directory and atomically repoints the champion symlink at it, so
 		// the serving runtime never observes a missing or partial champion.

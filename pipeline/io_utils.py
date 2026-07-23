@@ -9,12 +9,47 @@ filesystem, so os.replace is atomic) and are fsync'd before the rename.
 On failure the temp file is removed and the destination is left untouched.
 """
 
+import fcntl
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
+
+from pipeline import config
+
+
+@contextmanager
+def registry_lock():
+    """Exclusive model-registry lock shared with the Go services.
+
+    Mirrors go/monitoring/lock.go: an advisory flock on
+    models/.registry.lock, so a Python training/export run and a Go
+    retrain/promote exclude each other instead of relying on Airflow
+    scheduling. Non-blocking like the Go side — failing fast surfaces
+    the conflict rather than silently queueing registry mutations.
+
+    Only entry points take this lock. Library save/export functions
+    must not: `gbm retrain` already holds the flock while it runs
+    pipeline/train_challenger.py, so a nested acquire would fail.
+    """
+    models = config.models_dir()
+    models.mkdir(parents=True, exist_ok=True)
+    path = models / ".registry.lock"
+    f = open(path, "a+")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise RuntimeError(f"another retrain/promote holds {path}") from e
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()
 
 
 def _replace_atomic(tmp_path: Path, dest: Path) -> None:

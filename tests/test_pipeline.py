@@ -171,3 +171,70 @@ class TestGradeMap:
         assert GRADE_MAP["A"] < GRADE_MAP["G"]
         values = sorted(GRADE_MAP.values())
         assert values == list(range(1, 8))
+
+
+# --- Registry config helpers (versioning + single promotion door) ---
+
+import json
+
+import pytest
+
+from pipeline import config
+
+
+class TestVersionHelpers:
+    def test_parse_version(self):
+        assert config.parse_version("v1.2") == (1, 2)
+        assert config.parse_version("v10.31") == (10, 31)
+
+    def test_parse_version_ignores_tag_suffix(self):
+        # Reject-inference challengers are tagged "-ri"; a promoted one
+        # must still parse so later bumps do not crash.
+        assert config.parse_version("v1.2-ri") == (1, 2)
+
+    def test_parse_version_rejects_garbage(self):
+        with pytest.raises(ValueError):
+            config.parse_version("champion")
+
+    def test_next_version_without_champion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        assert config.next_version() == "v1.0"
+        assert config.next_version(suffix="-ri") == "v1.0-ri"
+
+    def test_next_version_bumps_minor(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        champ = tmp_path / "champion"
+        champ.mkdir(parents=True)
+        (champ / "model_metadata.json").write_text(json.dumps({"version": "v1.2"}))
+        assert config.next_version() == "v1.3"
+        assert config.next_version(suffix="-ri") == "v1.3-ri"
+
+    def test_next_version_after_promoted_ri_champion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        champ = tmp_path / "champion"
+        champ.mkdir(parents=True)
+        (champ / "model_metadata.json").write_text(json.dumps({"version": "v1.2-ri"}))
+        assert config.next_version() == "v1.3"
+
+    def test_next_version_unparseable_restarts(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CREDIT_RISK_MODELS_DIR", str(tmp_path))
+        champ = tmp_path / "champion"
+        champ.mkdir(parents=True)
+        (champ / "model_metadata.json").write_text(json.dumps({"version": "weird"}))
+        assert config.next_version() == "v1.0"
+
+
+class TestMutableModelDirGuard:
+    def test_refuses_promoted_champion_symlink(self, tmp_path):
+        real = tmp_path / "versions" / "v1.0"
+        real.mkdir(parents=True)
+        link = tmp_path / "champion"
+        link.symlink_to(real)
+        with pytest.raises(RuntimeError, match="promoted champion"):
+            config.assert_mutable_model_dir(link)
+
+    def test_allows_real_and_absent_dirs(self, tmp_path):
+        real = tmp_path / "challenger"
+        real.mkdir()
+        config.assert_mutable_model_dir(real)          # legacy real dir
+        config.assert_mutable_model_dir(tmp_path / "new")  # not yet created

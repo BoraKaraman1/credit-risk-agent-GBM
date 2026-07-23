@@ -2,6 +2,8 @@ package monitoring
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +135,44 @@ func TestPromoteChallenger(t *testing.T) {
 	if _, err := promoteChallenger(modelsDir); err == nil {
 		t.Error("re-promoting an existing version should fail (immutable)")
 	}
+}
+
+func TestNotifyReload(t *testing.T) {
+	t.Setenv("API_KEYS", "k1,k2")
+	var gotMethod, gotPath, gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotKey = r.Method, r.URL.Path, r.Header.Get("X-API-Key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := notifyReload(srv.URL); err != nil {
+		t.Fatalf("notifyReload: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/reload" {
+		t.Errorf("request = %s %s, want POST /reload", gotMethod, gotPath)
+	}
+	if gotKey != "k1" {
+		t.Errorf("X-API-Key = %q, want first configured key", gotKey)
+	}
+
+	t.Run("non-200 is an error", func(t *testing.T) {
+		bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "no challenger", http.StatusServiceUnavailable)
+		}))
+		defer bad.Close()
+		if err := notifyReload(bad.URL); err == nil {
+			t.Error("want error on non-200 reload response")
+		}
+	})
+
+	t.Run("api down is an error", func(t *testing.T) {
+		down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		down.Close()
+		if err := notifyReload(down.URL); err == nil {
+			t.Error("want error when the API is unreachable")
+		}
+	})
 }
 
 func TestPromoteAtomicSwapOverSymlink(t *testing.T) {

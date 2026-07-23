@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/shared/config"
 	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/shared/model"
@@ -168,6 +171,31 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
+// notifyReload tells a running scoring API to hot-load the newly
+// promoted champion. Best-effort by design: the registry swap has
+// already happened, so a failure is loudly logged but never fails the
+// promotion (serving picks the model up at its next reload/restart).
+func notifyReload(baseURL string) error {
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(baseURL, "/")+"/reload", nil)
+	if err != nil {
+		return err
+	}
+	if keys := config.APIKeys(); len(keys) > 0 {
+		req.Header.Set("X-API-Key", keys[0])
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("reload returned %s: %s", resp.Status, body)
+	}
+	return nil
+}
+
 func RunPromote() {
 	config.LoadEnv()
 	release, err := acquireModelsLock()
@@ -183,4 +211,16 @@ func RunPromote() {
 	}
 	slog.Info("challenger promoted to champion (atomic pointer swap)",
 		"version", version, "champion", config.ChampionDir())
+
+	if url := config.ScoringAPIURL(); url != "" {
+		if err := notifyReload(url); err != nil {
+			slog.Warn("promotion succeeded but the scoring API reload failed; "+
+				"serving keeps the previous champion until reload/restart",
+				"url", url, "error", err)
+		} else {
+			slog.Info("scoring API reloaded the new champion", "url", url)
+		}
+	} else {
+		slog.Info("SCORING_API_URL not set; POST /reload to the scoring API to serve the new champion")
+	}
 }

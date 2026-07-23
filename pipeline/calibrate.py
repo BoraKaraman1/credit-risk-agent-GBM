@@ -8,7 +8,9 @@ the test split, and maps calibrated PDs to an industry-style scorecard
 score via points-to-double-odds (600 = 30:1 good:bad odds, PDO 20).
 
 Usage (standalone, calibrates an already-trained model):
-    python pipeline/calibrate.py [model_dir]   # default: data/models/champion
+    python pipeline/calibrate.py [model_dir]   # default: data/models/challenger
+(A promoted champion is immutable — recalibrate the challenger and
+promote it instead.)
 """
 
 import json
@@ -124,6 +126,7 @@ def calibrate_model(model, X_cal, y_cal, X_test, y_test, raw_test=None):
 
 def save_calibration(dest_dir, calibrator, report):
     """Save calibrator.joblib and record the report in model_metadata.json."""
+    config.assert_mutable_model_dir(dest_dir)
     dest_dir = Path(dest_dir)
     joblib.dump(calibrator, dest_dir / "calibrator.joblib")
 
@@ -143,7 +146,7 @@ def run(model_dir=None):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from pipeline.train import early_stopping_split, load_gold_data
 
-    model_dir = Path(model_dir) if model_dir else config.champion_dir()
+    model_dir = Path(model_dir) if model_dir else config.challenger_dir()
     model = joblib.load(config.model_path(model_dir))
 
     X_train, y_train, X_val, y_val, X_test, y_test, _ = load_gold_data()
@@ -160,5 +163,7 @@ if __name__ == "__main__":
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    target = sys.argv[1] if len(sys.argv) > 1 else config.champion_dir()
-    run(target)
+    target = sys.argv[1] if len(sys.argv) > 1 else config.challenger_dir()
+    from pipeline.io_utils import registry_lock
+    with registry_lock():
+        run(target)

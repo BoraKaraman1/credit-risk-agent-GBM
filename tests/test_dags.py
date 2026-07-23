@@ -72,10 +72,14 @@ def test_pipeline_dag_structure():
     dag = _dagbag().dags["credit_risk_pipeline"]
     task_ids = {t.task_id for t in dag.tasks}
     assert {"bronze_ingest", "silver_transform", "gold_features",
-            "train_model", "export_model_json", "sync_to_supabase",
+            "train_challenger", "export_model_json", "sync_to_supabase",
             "fairness_analysis"} <= task_ids
     export = dag.get_task("export_model_json")
-    assert {t.task_id for t in export.upstream_list} == {"train_model"}
+    assert {t.task_id for t in export.upstream_list} == {"train_challenger"}
+    # Reject inference is sequenced after export: both write the
+    # challenger slot, and the branch must be the last writer.
+    decide = dag.get_task("decide_reject_inference")
+    assert {t.task_id for t in decide.upstream_list} == {"export_model_json"}
 
 
 def test_monitoring_dag_structure():

@@ -6,6 +6,10 @@ data/models/challenger, and exports model.json for the Go runtime.
 
 Logs go to stderr; stdout carries a single JSON result for the caller.
 
+This script must NOT take the registry lock (io_utils.registry_lock):
+`gbm retrain` already holds the flock on models/.registry.lock for the
+whole subprocess, and a nested non-blocking acquire would fail.
+
 Usage:
     python pipeline/train_challenger.py <version>
 """
@@ -20,7 +24,7 @@ import lightgbm as lgb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline import config, fairness
+from pipeline import config, fairness, model_card
 from pipeline.train import early_stopping_split, evaluate_model, load_gold_data, save_model
 from pipeline.calibrate import calibrate_model, save_calibration
 from pipeline.export_model_json import export_model
@@ -81,6 +85,12 @@ def main(version):
         fairness.run(model=model, X_test=X_test, y_test=y_test,
                      calibrator=calibrator, raw_score=test_scores))
     fairness.save_fairness(config.challenger_dir(), challenger_fairness)
+
+    # The model card ships with the model for the pre-promotion human
+    # review (SR 11-7); model_card.generate only logs, so stdout stays
+    # reserved for the JSON result below.
+    model_card.generate(config.challenger_dir(),
+                        config.challenger_dir() / "model_card.md")
 
     champion_fairness = None
     if config.metadata_path(config.champion_dir()).exists():

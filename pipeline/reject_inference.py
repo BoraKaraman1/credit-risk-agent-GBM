@@ -22,7 +22,7 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import train_test_split
 from datetime import datetime, timezone
 
-from pipeline import calibrate, config, fairness
+from pipeline import calibrate, config, fairness, io_utils, model_card
 from pipeline.export_model_json import export_model
 
 logger = logging.getLogger(__name__)
@@ -223,6 +223,7 @@ def compare_models(champion, augmented, X_test, y_test, feature_cols):
 def save_augmented_model(model, feature_cols, metrics, comparison):
     """Save augmented model as challenger with reject inference metadata."""
     dest = config.challenger_dir()
+    config.assert_mutable_model_dir(dest)
     dest.mkdir(parents=True, exist_ok=True)
 
     joblib.dump(model, dest / "model.joblib")
@@ -327,18 +328,23 @@ def run():
 
         # Step 5: Save as challenger, then calibrate and record fairness
         # on calibrated PDs — the same governance bar as the champion
-        # path, so the promote gate (APPROVED only) is reachable.
-        version = save_augmented_model(
-            augmented_model, feature_cols, aug_metrics, comparison
-        )
+        # path, so the promote gate (APPROVED only) is reachable. The
+        # registry mutation runs under the cross-language flock; the
+        # library save/export functions themselves never lock.
         calibrator, cal_report = calibrate.calibrate_model(
             augmented_model, X_es, y_es, X_test, y_test)
-        calibrate.save_calibration(config.challenger_dir(), calibrator, cal_report)
         ri_fairness = fairness.summarize(fairness.run(
             model=augmented_model, X_test=X_test, y_test=y_test,
             calibrator=calibrator))
-        fairness.save_fairness(config.challenger_dir(), ri_fairness)
-        export_model(config.challenger_dir())
+        with io_utils.registry_lock():
+            version = save_augmented_model(
+                augmented_model, feature_cols, aug_metrics, comparison
+            )
+            calibrate.save_calibration(config.challenger_dir(), calibrator, cal_report)
+            fairness.save_fairness(config.challenger_dir(), ri_fairness)
+            model_card.generate(config.challenger_dir(),
+                                config.challenger_dir() / "model_card.md")
+            export_model(config.challenger_dir())
         mlflow.log_param("model_version", version)
 
     # Recommendation

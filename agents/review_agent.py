@@ -24,6 +24,7 @@ Usage:
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -120,13 +121,15 @@ def run_monitor(monitor: str) -> str:
 
 
 def read_model_card() -> str:
-    """Read the current champion's model card (docs/model_card.md).
+    """Read the current champion's model card (the model_card.md that
+    ships inside the champion model directory, MODEL_CARD_PATH override).
 
     The card carries the validation status, data window, discrimination
     metrics, calibration reliability table, scorecard parameters, and
     the full fairness breakdown.
     """
-    path = ROOT / "docs" / "model_card.md"
+    override = os.getenv("MODEL_CARD_PATH")
+    path = Path(override) if override else config.champion_dir() / "model_card.md"
     if not path.exists():
         return f"ERROR: model card not found at {path}."
     return path.read_text()

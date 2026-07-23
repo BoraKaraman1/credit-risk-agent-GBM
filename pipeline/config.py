@@ -71,6 +71,48 @@ def model_path(directory) -> Path:
     return Path(directory) / "model.pkl"
 
 
+def parse_version(version: str) -> tuple[int, int]:
+    """Parse "v<major>.<minor>[-tag]" into (major, minor). A "-tag"
+    suffix (e.g. reject inference's "-ri") is ignored, so a tagged
+    challenger can be promoted without breaking later version bumps.
+    Must stay in sync with nextVersion in go/monitoring/retrain.go."""
+    core = version.lstrip("v").split("-", 1)[0]
+    major, minor = core.split(".")
+    return int(major), int(minor)
+
+
+def next_version(suffix: str = "") -> str:
+    """Next model version: champion minor + 1 (v1.2 -> v1.3), or v1.0
+    when no champion exists (a broken champion symlink reads as absent,
+    restarting at v1.0 — promote then refuses the duplicate version).
+    `suffix` tags the produced version without affecting the bump."""
+    meta = metadata_path(champion_dir())
+    if not meta.exists():
+        return f"v1.0{suffix}"
+    with open(meta) as f:
+        prev = json.load(f).get("version", "v1.0")
+    try:
+        major, minor = parse_version(prev)
+    except ValueError:
+        logger.warning("unparseable champion version %r; restarting at v1.0", prev)
+        return f"v1.0{suffix}"
+    return f"v{major}.{minor + 1}{suffix}"
+
+
+def assert_mutable_model_dir(directory) -> None:
+    """Refuse writes into a promoted champion. After `gbm promote`,
+    models/champion is a symlink into the immutable versions/ archive;
+    new models are written to challenger/ and promoted (single door).
+    Legacy real champion directories remain writable. Checked before
+    any mkdir/write, since mkdir silently traverses symlinks."""
+    d = Path(directory)
+    if d.is_symlink():
+        raise RuntimeError(
+            f"{d} is a promoted champion (symlink into the immutable versions/ "
+            "archive); write to the challenger and run `gbm promote` instead"
+        )
+
+
 def metadata_path(directory) -> Path:
     return Path(directory) / "model_metadata.json"
 

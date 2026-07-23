@@ -1,11 +1,13 @@
 """
 Airflow DAG: Credit Risk Pipeline
 Monthly full pipeline run: Bronze → Silver → Gold → Train → Export → Sync.
-Optional branch: Reject Inference after training (enabled via DAG config).
+Optional branch: Reject Inference after export (enabled via DAG config).
 
-Training stays in Python; after training, the champion is exported to
-model.json so the Go services (scoring API, monitors, sync) can load it,
-then the gbm sync command pushes features to the feature store.
+Training stays in Python and always produces a *challenger* with its
+model card; the champion is only ever created by `gbm promote` after
+human review (single promotion door, SR 11-7). The export task dumps
+the challenger's model.json for the Go runtime, then gbm sync pushes
+features to the feature store.
 """
 
 import os
@@ -52,7 +54,9 @@ def _run_train():
 def _run_export_model():
     from pipeline import config
     from pipeline.export_model_json import export_model
-    export_model(config.champion_dir())
+    from pipeline.io_utils import registry_lock
+    with registry_lock():
+        export_model(config.challenger_dir())
 
 
 def _run_sync():
@@ -65,7 +69,16 @@ def _run_reject_inference():
 
 
 def _run_fairness():
+    """Standalone fairness snapshot of the current champion. At
+    bootstrap there is no champion yet (promotion is human-gated), so
+    skip instead of failing the first pipeline run."""
+    from pipeline import config
     from pipeline.fairness import run
+    if not config.model_path(config.champion_dir()).exists():
+        import logging
+        logging.getLogger(__name__).warning(
+            "no champion model yet; skipping fairness snapshot until first promote")
+        return
     run()
 
 
@@ -93,7 +106,7 @@ with DAG(
     bronze = PythonOperator(task_id="bronze_ingest", python_callable=_run_bronze)
     silver = PythonOperator(task_id="silver_transform", python_callable=_run_silver)
     gold = PythonOperator(task_id="gold_features", python_callable=_run_gold)
-    train = PythonOperator(task_id="train_model", python_callable=_run_train)
+    train = PythonOperator(task_id="train_challenger", python_callable=_run_train)
     export = PythonOperator(task_id="export_model_json", python_callable=_run_export_model)
     sync = PythonOperator(task_id="sync_to_supabase", python_callable=_run_sync)
     fairness = PythonOperator(task_id="fairness_analysis", python_callable=_run_fairness)
@@ -109,5 +122,7 @@ with DAG(
     bronze >> silver >> gold >> train >> export >> sync
     train >> fairness
 
-    # Optional reject inference branch after train
-    train >> decide_ri >> [reject_inf, skip_ri]
+    # Optional reject inference branch AFTER export: both write the
+    # challenger slot, so sequencing makes the RI model (when enabled)
+    # the deterministic final challenger of the run.
+    export >> decide_ri >> [reject_inf, skip_ri]
