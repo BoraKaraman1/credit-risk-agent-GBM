@@ -8,7 +8,8 @@
     "psi_warning": 0.10,
     "psi_critical": 0.25,
     "csi_threshold": 0.20,
-    "auc_drop_threshold": 0.03
+    "auc_drop_threshold": 0.03,
+    "min_drift_scores": 500
   },
   "fairness": {
     "dir_threshold": 0.80,

@@ -9,13 +9,18 @@ import (
 
 func TestRetrainSignals(t *testing.T) {
 	t.Run("drift critical retrains", func(t *testing.T) {
-		needs, reasons := driftRetrainSignal("CRITICAL", 0.31)
+		needs, reasons := driftRetrainSignal(true, "CRITICAL", 0.31)
 		if !needs || len(reasons) != 1 || !strings.Contains(reasons[0], "psi_critical") {
 			t.Errorf("needs=%v reasons=%v", needs, reasons)
 		}
 	})
 	t.Run("drift warning does not retrain", func(t *testing.T) {
-		if needs, reasons := driftRetrainSignal("WARNING", 0.15); needs || len(reasons) != 0 {
+		if needs, reasons := driftRetrainSignal(true, "WARNING", 0.15); needs || len(reasons) != 0 {
+			t.Errorf("needs=%v reasons=%v", needs, reasons)
+		}
+	})
+	t.Run("ineligible critical drift does not retrain", func(t *testing.T) {
+		if needs, reasons := driftRetrainSignal(false, "CRITICAL", 3.0); needs || len(reasons) != 0 {
 			t.Errorf("needs=%v reasons=%v", needs, reasons)
 		}
 	})
@@ -28,6 +33,27 @@ func TestRetrainSignals(t *testing.T) {
 	t.Run("auc drop under threshold does not", func(t *testing.T) {
 		if needs, reasons := performanceRetrainSignal(config.AUCDropThreshold - 0.01); needs || len(reasons) != 0 {
 			t.Errorf("needs=%v reasons=%v", needs, reasons)
+		}
+	})
+}
+
+func TestDriftObservationState(t *testing.T) {
+	t.Run("test proxy remains diagnostic", func(t *testing.T) {
+		status, eligible := driftObservationState(false, 10000, "CRITICAL")
+		if status != "CRITICAL" || eligible {
+			t.Errorf("status=%q eligible=%v", status, eligible)
+		}
+	})
+	t.Run("small real sample is insufficient", func(t *testing.T) {
+		status, eligible := driftObservationState(true, config.MinDriftScores-1, "CRITICAL")
+		if status != "INSUFFICIENT_DATA" || eligible {
+			t.Errorf("status=%q eligible=%v", status, eligible)
+		}
+	})
+	t.Run("minimum real sample is eligible", func(t *testing.T) {
+		status, eligible := driftObservationState(true, config.MinDriftScores, "WARNING")
+		if status != "WARNING" || !eligible {
+			t.Errorf("status=%q eligible=%v", status, eligible)
 		}
 	})
 }

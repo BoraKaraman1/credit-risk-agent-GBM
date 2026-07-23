@@ -24,6 +24,7 @@ def test_contract_is_sane():
     assert 0 < m["psi_warning"] < m["psi_critical"]
     assert m["csi_threshold"] > 0
     assert m["auc_drop_threshold"] > 0
+    assert isinstance(m["min_drift_scores"], int) and m["min_drift_scores"] > 0
     assert 0 < CONTRACT["fairness"]["dir_threshold"] <= 1
     assert 0 <= CONTRACT["fairness"]["dir_worsen_tolerance"] < CONTRACT["fairness"]["dir_threshold"]
 
@@ -35,6 +36,7 @@ def test_pipeline_config_matches_contract():
     assert config.PSI_CRITICAL == CONTRACT["monitoring"]["psi_critical"]
     assert config.CSI_THRESHOLD == CONTRACT["monitoring"]["csi_threshold"]
     assert config.AUC_DROP_THRESHOLD == CONTRACT["monitoring"]["auc_drop_threshold"]
+    assert config.MIN_DRIFT_SCORES == CONTRACT["monitoring"]["min_drift_scores"]
     assert config.DIR_THRESHOLD == CONTRACT["fairness"]["dir_threshold"]
     assert config.DIR_WORSEN_TOLERANCE == CONTRACT["fairness"]["dir_worsen_tolerance"]
 

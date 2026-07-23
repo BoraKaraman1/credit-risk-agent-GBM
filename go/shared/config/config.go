@@ -31,6 +31,7 @@ type thresholdContract struct {
 		PSICritical      float64 `json:"psi_critical"`
 		CSIThreshold     float64 `json:"csi_threshold"`
 		AUCDropThreshold float64 `json:"auc_drop_threshold"`
+		MinDriftScores   int     `json:"min_drift_scores"`
 	} `json:"monitoring"`
 	Fairness struct {
 		DIRThreshold       float64 `json:"dir_threshold"`
@@ -46,6 +47,7 @@ func mustParseContract(b []byte) thresholdContract {
 	if !(0 < c.Decision.ApproveBelow && c.Decision.ApproveBelow < c.Decision.ReviewBelow && c.Decision.ReviewBelow < 1) ||
 		!(0 < c.Monitoring.PSIWarning && c.Monitoring.PSIWarning < c.Monitoring.PSICritical) ||
 		c.Monitoring.CSIThreshold <= 0 || c.Monitoring.AUCDropThreshold <= 0 ||
+		c.Monitoring.MinDriftScores <= 0 ||
 		!(0 < c.Fairness.DIRThreshold && c.Fairness.DIRThreshold <= 1) ||
 		!(0 <= c.Fairness.DIRWorsenTolerance && c.Fairness.DIRWorsenTolerance < c.Fairness.DIRThreshold) {
 		panic("config: contract.json thresholds fail sanity checks")
@@ -57,9 +59,10 @@ var contract = mustParseContract(contractJSON)
 
 // Drift thresholds
 var (
-	PSIWarning   = contract.Monitoring.PSIWarning   // score distribution drift warning
-	PSICritical  = contract.Monitoring.PSICritical  // score distribution drift -> retrain
-	CSIThreshold = contract.Monitoring.CSIThreshold // per-feature characteristic stability index
+	PSIWarning     = contract.Monitoring.PSIWarning     // score distribution drift warning
+	PSICritical    = contract.Monitoring.PSICritical    // score distribution drift -> retrain
+	CSIThreshold   = contract.Monitoring.CSIThreshold   // per-feature characteristic stability index
+	MinDriftScores = contract.Monitoring.MinDriftScores // minimum real scores before automated drift action
 )
 
 // Performance thresholds

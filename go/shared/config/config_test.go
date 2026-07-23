@@ -133,6 +133,9 @@ func TestThresholdOrdering(t *testing.T) {
 	if AUCDropThreshold <= 0 || CSIThreshold <= 0 {
 		t.Error("thresholds must be positive")
 	}
+	if MinDriftScores <= 0 {
+		t.Error("minimum drift sample must be positive")
+	}
 	if !(0 <= FairnessWorsenTolerance && FairnessWorsenTolerance < FairnessDIRThreshold) {
 		t.Error("worsen tolerance must be non-negative and below the DIR threshold")
 	}

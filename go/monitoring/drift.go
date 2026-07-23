@@ -26,6 +26,9 @@ type driftReport struct {
 	Timestamp              string             `json:"timestamp"`
 	ModelVersion           string             `json:"model_version"`
 	ScoresSource           string             `json:"scores_source"`
+	NObservations          int                `json:"n_observations"`
+	MinimumObservations    int                `json:"minimum_observations"`
+	MonitoringEligible     bool               `json:"monitoring_eligible"`
 	PSI                    float64            `json:"psi"`
 	PSIStatus              string             `json:"psi_status"`
 	PSIThresholds          map[string]float64 `json:"psi_thresholds"`
@@ -40,10 +43,22 @@ type driftReport struct {
 	RetrainReasons []string `json:"retrain_reasons"`
 }
 
+// driftObservationState prevents either a tiny real sample or the local
+// test-set proxy from becoming an automated governance signal.
+func driftObservationState(realProduction bool, n int, diagnosticStatus string) (string, bool) {
+	if !realProduction {
+		return diagnosticStatus, false
+	}
+	if n < config.MinDriftScores {
+		return "INSUFFICIENT_DATA", false
+	}
+	return diagnosticStatus, true
+}
+
 // driftRetrainSignal is the machine half of the drift verdict: retrain
-// on a CRITICAL score-distribution shift.
-func driftRetrainSignal(psiStatus string, psi float64) (bool, []string) {
-	if psiStatus == "CRITICAL" {
+// on an eligible CRITICAL score-distribution shift.
+func driftRetrainSignal(monitoringEligible bool, psiStatus string, psi float64) (bool, []string) {
+	if monitoringEligible && psiStatus == "CRITICAL" {
 		return true, []string{fmt.Sprintf("psi_critical (%.4f)", psi)}
 	}
 	return false, []string{}
@@ -82,6 +97,7 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		productionScores []float64
 		prodFeatureCols  map[string][]float64
 		database         *db.DB
+		realProduction   bool
 	)
 	if config.DatabaseURL() != "" {
 		d, err := db.Connect(ctx, config.DatabaseURL())
@@ -96,6 +112,7 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		}
 		if len(scores) > 0 {
 			productionScores = scores
+			realProduction = true
 			scoresSource = fmt.Sprintf("scoring_log (%d scores)", len(scores))
 			slog.Info("using scores from scoring_log", "n", len(scores))
 			// Compute CSI on the same scored applicants' feature
@@ -126,13 +143,16 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 
 	// --- PSI on score distribution ---
 	psi, trainPct, prodPct := metrics.PSI(trainScores, productionScores, 10)
-	psiStatus := "OK"
+	diagnosticStatus := "OK"
 	switch {
 	case psi > config.PSICritical:
-		psiStatus = "CRITICAL"
+		diagnosticStatus = "CRITICAL"
 	case psi > config.PSIWarning:
-		psiStatus = "WARNING"
+		diagnosticStatus = "WARNING"
 	}
+	psiStatus, monitoringEligible := driftObservationState(
+		realProduction, len(productionScores), diagnosticStatus,
+	)
 	slog.Info(fmt.Sprintf("Score PSI = %.4f (%s)", psi, psiStatus))
 
 	// --- CSI on individual features ---
@@ -157,11 +177,14 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		slog.Info(fmt.Sprintf("no individual features above CSI threshold (%.2f)", config.CSIThreshold))
 	}
 
-	needsRetrain, retrainReasons := driftRetrainSignal(psiStatus, psi)
+	needsRetrain, retrainReasons := driftRetrainSignal(monitoringEligible, psiStatus, psi)
 	rep := &driftReport{
 		Timestamp:              time.Now().UTC().Format(time.RFC3339),
 		ModelVersion:           m.Version,
 		ScoresSource:           scoresSource,
+		NObservations:          len(productionScores),
+		MinimumObservations:    config.MinDriftScores,
+		MonitoringEligible:     monitoringEligible,
 		PSI:                    round(psi, 4),
 		PSIStatus:              psiStatus,
 		PSIThresholds:          map[string]float64{"warning": config.PSIWarning, "critical": config.PSICritical},
@@ -169,9 +192,11 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		ProductionDistribution: prodPct,
 		CSIResults:             csiResults,
 		DriftedFeatures:        drifted,
-		Recommendation:         driftRecommendation(psi, psiStatus, csiResults),
-		NeedsRetrain:           needsRetrain,
-		RetrainReasons:         retrainReasons,
+		Recommendation: driftRecommendation(
+			psi, psiStatus, csiResults, realProduction, len(productionScores),
+		),
+		NeedsRetrain:   needsRetrain,
+		RetrainReasons: retrainReasons,
 	}
 
 	if database != nil {
@@ -181,8 +206,12 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		}
 		sort.Strings(driftedNames)
 		err := database.InsertDriftLog(ctx, "psi", psi, m.Version, map[string]any{
-			"csi":              csiResults,
-			"drifted_features": driftedNames,
+			"csi":                  csiResults,
+			"drifted_features":     driftedNames,
+			"scores_source":        scoresSource,
+			"n_observations":       len(productionScores),
+			"minimum_observations": config.MinDriftScores,
+			"monitoring_eligible":  monitoringEligible,
 		})
 		if err != nil {
 			slog.Warn("could not log to Supabase", "error", err)
@@ -214,7 +243,25 @@ func featureColumnsFromSnapshots(snaps []map[string]*float64, features []string)
 	return cols
 }
 
-func driftRecommendation(psi float64, psiStatus string, csiResults map[string]float64) string {
+func driftRecommendation(
+	psi float64,
+	psiStatus string,
+	csiResults map[string]float64,
+	realProduction bool,
+	n int,
+) string {
+	if !realProduction {
+		return fmt.Sprintf(
+			"DIAGNOSTIC ONLY. Score PSI (%.4f) uses the test-set proxy and cannot trigger automated retraining.",
+			psi,
+		)
+	}
+	if psiStatus == "INSUFFICIENT_DATA" {
+		return fmt.Sprintf(
+			"WAIT FOR MORE DATA. Only %d production scores are available; at least %d are required for automated drift action.",
+			n, config.MinDriftScores,
+		)
+	}
 	switch psiStatus {
 	case "CRITICAL":
 		return fmt.Sprintf(

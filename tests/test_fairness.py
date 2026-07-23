@@ -244,10 +244,25 @@ class TestSummarize:
         for attr, a in summary["attributes"].items():
             assert "privileged_group" in a
             assert "violations" in a
-            # Every group carries a DIR plus approval and default rates
+            # Every group carries all fairness deltas plus outcome rates.
             for group, g in a["groups"].items():
-                assert "dir" in g and "approval_rate" in g and "default_rate" in g
+                assert set(g) == {
+                    "dir",
+                    "eod",
+                    "spd",
+                    "approval_rate",
+                    "default_rate",
+                }
             # DIR values match the underlying report
-            ratios = report["attributes"][attr]["disparate_impact"]["ratios"]
+            underlying = report["attributes"][attr]
+            ratios = underlying["disparate_impact"]["ratios"]
             for group, dir_val in ratios.items():
                 assert a["groups"][group]["dir"] == dir_val
+                assert (
+                    a["groups"][group]["eod"]
+                    == underlying["equal_opportunity_diff"][group]
+                )
+                assert (
+                    a["groups"][group]["spd"]
+                    == underlying["statistical_parity_diff"][group]
+                )

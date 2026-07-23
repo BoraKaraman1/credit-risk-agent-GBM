@@ -284,17 +284,21 @@ def summarize(report: dict) -> dict:
     """Compact fairness summary for the model card and the promotion gate.
 
     Keeps only what downstream consumers need: per attribute, the
-    privileged group, each group's DIR plus approval and default rates,
-    and the list of groups in violation.
+    privileged group, each group's DIR, EOD, SPD, approval and default
+    rates, and the list of groups in violation.
     """
     attrs = {}
     for attr_name, ar in report["attributes"].items():
         approval = {m["group"]: m["approval_rate"] for m in ar["group_metrics"]}
         default = {m["group"]: m["default_rate"] for m in ar["group_metrics"]}
+        eod = ar["equal_opportunity_diff"]
+        spd = ar["statistical_parity_diff"]
         groups = {}
         for group, dir_val in ar["disparate_impact"]["ratios"].items():
             groups[group] = {
                 "dir": dir_val,
+                "eod": eod.get(group),
+                "spd": spd.get(group),
                 "approval_rate": approval.get(group),
                 "default_rate": default.get(group),
             }
