@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir -r requirements/ui.txt \
     && useradd --system --gid app --create-home app
 
 COPY ui/ ui/
+# Cross-language threshold contract read by ui/core.py; same relative
+# path as in the repo so the loader needs no environment switch.
+COPY go/shared/config/contract.json go/shared/config/contract.json
 
 USER app
 

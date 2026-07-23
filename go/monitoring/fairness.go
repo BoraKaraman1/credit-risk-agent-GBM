@@ -7,6 +7,7 @@ package monitoring
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,19 +26,17 @@ type championFairness struct {
 
 // minDIR extracts the lowest Disparate Impact Ratio across all
 // attributes and groups; it is the row's scalar metric_value (worst-case
-// four-fifths position, 1.0 = parity).
-func minDIR(fairness []byte) float64 {
-	var parsed struct {
-		Attributes map[string]struct {
-			Groups map[string]struct {
-				DIR float64 `json:"dir"`
-			} `json:"groups"`
-		} `json:"attributes"`
+// four-fifths position, 1.0 = parity). It fails closed: malformed or
+// empty summaries return an error instead of degrading to "parity".
+func minDIR(fairness []byte) (float64, error) {
+	var parsed fairnessSummary
+	if err := json.Unmarshal(fairness, &parsed); err != nil {
+		return 0, fmt.Errorf("malformed fairness summary: %w", err)
+	}
+	if len(parsed.Attributes) == 0 {
+		return 0, fmt.Errorf("fairness summary has no attributes")
 	}
 	min := 1.0
-	if err := json.Unmarshal(fairness, &parsed); err != nil {
-		return min
-	}
 	for _, attr := range parsed.Attributes {
 		for _, g := range attr.Groups {
 			if g.DIR < min {
@@ -45,7 +44,7 @@ func minDIR(fairness []byte) float64 {
 			}
 		}
 	}
-	return min
+	return min, nil
 }
 
 // syncFairnessLog inserts the champion's fairness summary into drift_log
@@ -67,6 +66,15 @@ func syncFairnessLog(ctx context.Context, database *db.DB) {
 		return
 	}
 
+	// Fail closed: a summary that cannot be parsed is not published as
+	// "parity" — it is not published at all, loudly.
+	worst, err := minDIR(meta.Fairness)
+	if err != nil {
+		slog.Error("fairness sync: refusing to publish", "error", err,
+			"model_version", meta.Version)
+		return
+	}
+
 	exists, err := database.HasDriftLogEntry(ctx, "fairness", meta.Version)
 	if err != nil {
 		slog.Warn("fairness sync: could not check drift_log", "error", err)
@@ -75,7 +83,7 @@ func syncFairnessLog(ctx context.Context, database *db.DB) {
 	if exists {
 		return
 	}
-	if err := database.InsertDriftLog(ctx, "fairness", minDIR(meta.Fairness),
+	if err := database.InsertDriftLog(ctx, "fairness", worst,
 		meta.Version, meta.Fairness); err != nil {
 		slog.Warn("fairness sync: insert failed", "error", err)
 		return

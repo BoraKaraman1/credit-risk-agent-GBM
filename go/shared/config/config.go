@@ -3,6 +3,8 @@
 package config
 
 import (
+	_ "embed"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,27 +13,67 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// contract.json is the single source of truth for the thresholds shared
+// with the Python pipeline (pipeline/config.py) and the UI (ui/core.py).
+// It is embedded at compile time, so the binary stays self-contained and
+// a malformed contract fails the process at init, never at decision time.
+//
+//go:embed contract.json
+var contractJSON []byte
+
+type thresholdContract struct {
+	Decision struct {
+		ApproveBelow float64 `json:"approve_below"`
+		ReviewBelow  float64 `json:"review_below"`
+	} `json:"decision"`
+	Monitoring struct {
+		PSIWarning       float64 `json:"psi_warning"`
+		PSICritical      float64 `json:"psi_critical"`
+		CSIThreshold     float64 `json:"csi_threshold"`
+		AUCDropThreshold float64 `json:"auc_drop_threshold"`
+	} `json:"monitoring"`
+	Fairness struct {
+		DIRThreshold float64 `json:"dir_threshold"`
+	} `json:"fairness"`
+}
+
+func mustParseContract(b []byte) thresholdContract {
+	var c thresholdContract
+	if err := json.Unmarshal(b, &c); err != nil {
+		panic("config: invalid contract.json: " + err.Error())
+	}
+	if !(0 < c.Decision.ApproveBelow && c.Decision.ApproveBelow < c.Decision.ReviewBelow && c.Decision.ReviewBelow < 1) ||
+		!(0 < c.Monitoring.PSIWarning && c.Monitoring.PSIWarning < c.Monitoring.PSICritical) ||
+		c.Monitoring.CSIThreshold <= 0 || c.Monitoring.AUCDropThreshold <= 0 ||
+		!(0 < c.Fairness.DIRThreshold && c.Fairness.DIRThreshold <= 1) {
+		panic("config: contract.json thresholds fail sanity checks")
+	}
+	return c
+}
+
+var contract = mustParseContract(contractJSON)
+
 // Drift thresholds
-const (
-	PSIWarning   = 0.10 // score distribution drift warning
-	PSICritical  = 0.25 // score distribution drift -> retrain
-	CSIThreshold = 0.20 // per-feature characteristic stability index
+var (
+	PSIWarning   = contract.Monitoring.PSIWarning   // score distribution drift warning
+	PSICritical  = contract.Monitoring.PSICritical  // score distribution drift -> retrain
+	CSIThreshold = contract.Monitoring.CSIThreshold // per-feature characteristic stability index
 )
 
 // Performance thresholds
-const AUCDropThreshold = 0.03 // 3-point AUC drop from training -> retrain
+var AUCDropThreshold = contract.Monitoring.AUCDropThreshold // AUC drop from training -> retrain
 
 // Fairness: 80% rule (four-fifths) for the Disparate Impact Ratio.
-const FairnessDIRThreshold = 0.80
+var FairnessDIRThreshold = contract.Fairness.DIRThreshold
 
 // Outcome backfill: a scored applicant's outcome is treated as observed
 // only after this many days have passed since scoring (loan maturation).
 const defaultOutcomeBackfillDelayDays = 0
 
-// Decision thresholds (mirrored from the Python API)
-const (
-	ApproveThreshold = 0.15
-	ReviewThreshold  = 0.30
+// Decision thresholds
+var (
+	ApproveThreshold = contract.Decision.ApproveBelow
+	ReviewThreshold  = contract.Decision.ReviewBelow
 )
 
 // Per-client rate limit defaults (token bucket). RATE_LIMIT_RPS is the

@@ -6,6 +6,7 @@ the Go services agree on data/model locations in every deployment
 hardcoding paths relative to its own file.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -13,6 +14,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 logger = logging.getLogger(__name__)
+
+# Single source of truth for the thresholds shared with the Go services
+# (go:embed of the same file) and the UI. Loaded eagerly so a missing or
+# malformed contract fails at import, never at decision time.
+CONTRACT_PATH = ROOT / "go" / "shared" / "config" / "contract.json"
+with open(CONTRACT_PATH) as _f:
+    _CONTRACT = json.load(_f)
+
+APPROVE_THRESHOLD = _CONTRACT["decision"]["approve_below"]
+REVIEW_THRESHOLD = _CONTRACT["decision"]["review_below"]
+PSI_WARNING = _CONTRACT["monitoring"]["psi_warning"]
+PSI_CRITICAL = _CONTRACT["monitoring"]["psi_critical"]
+CSI_THRESHOLD = _CONTRACT["monitoring"]["csi_threshold"]
+AUC_DROP_THRESHOLD = _CONTRACT["monitoring"]["auc_drop_threshold"]
+DIR_THRESHOLD = _CONTRACT["fairness"]["dir_threshold"]
 
 
 def data_dir() -> Path:

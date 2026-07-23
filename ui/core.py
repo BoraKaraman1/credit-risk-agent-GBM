@@ -4,6 +4,9 @@ responses into DataFrames and presentation dicts. No streamlit imports,
 so everything here is unit-testable with plain pandas.
 """
 
+import json
+from pathlib import Path
+
 import pandas as pd
 
 # Chart colors. Marks use one categorical hue (every chart here is a
@@ -18,11 +21,15 @@ STATUS = {
 }
 TEXT_SECONDARY = "#52514e"
 
-# Monitor thresholds, mirrored from go/shared/config (the monitors are
-# the source of truth; the UI only annotates charts with them).
-PSI_WARNING = 0.10
-PSI_CRITICAL = 0.25
-AUC_DROP_THRESHOLD = 0.03
+# Monitor thresholds from the cross-language contract — the same file
+# the Go monitors embed, so chart annotations can never drift from the
+# thresholds actually enforced. (Dockerfile.ui copies it alongside ui/.)
+_CONTRACT_PATH = Path(__file__).resolve().parent.parent / "go" / "shared" / "config" / "contract.json"
+_CONTRACT = json.loads(_CONTRACT_PATH.read_text())
+
+PSI_WARNING = _CONTRACT["monitoring"]["psi_warning"]
+PSI_CRITICAL = _CONTRACT["monitoring"]["psi_critical"]
+AUC_DROP_THRESHOLD = _CONTRACT["monitoring"]["auc_drop_threshold"]
 
 DECISION_PRESENTATION = {
     "approve": {"label": "Approve", "icon": "✅", "status": "good"},

@@ -19,16 +19,20 @@ func TestMinDIR(t *testing.T) {
 			}}
 		}
 	}`)
-	if got := minDIR(fairness); got != 0.499 {
+	got, err := minDIR(fairness)
+	if err != nil {
+		t.Fatalf("minDIR: %v", err)
+	}
+	if got != 0.499 {
 		t.Errorf("minDIR = %v, want 0.499", got)
 	}
 
-	t.Run("empty or malformed defaults to parity", func(t *testing.T) {
-		if got := minDIR([]byte(`{}`)); got != 1.0 {
-			t.Errorf("minDIR(empty) = %v, want 1.0", got)
+	t.Run("empty or malformed fails closed", func(t *testing.T) {
+		if _, err := minDIR([]byte(`{}`)); err == nil {
+			t.Error("minDIR(empty) should error, not default to parity")
 		}
-		if got := minDIR([]byte(`not json`)); got != 1.0 {
-			t.Errorf("minDIR(garbage) = %v, want 1.0", got)
+		if _, err := minDIR([]byte(`not json`)); err == nil {
+			t.Error("minDIR(garbage) should error, not default to parity")
 		}
 	})
 }

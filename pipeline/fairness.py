@@ -26,12 +26,12 @@ logger = logging.getLogger(__name__)
 DATA_DIR = config.data_dir()
 GOLD_DIR = config.gold_dir()
 
-# Decision thresholds (mirrored from API)
-APPROVE_THRESHOLD = 0.15
-REVIEW_THRESHOLD = 0.30
-
-# 80% rule threshold for Disparate Impact Ratio
-DIR_THRESHOLD = 0.80
+# Decision and four-fifths thresholds come from the cross-language
+# contract (go/shared/config/contract.json) via config, so the analysis
+# always matches what the Go serving layer enforces.
+APPROVE_THRESHOLD = config.APPROVE_THRESHOLD
+REVIEW_THRESHOLD = config.REVIEW_THRESHOLD
+DIR_THRESHOLD = config.DIR_THRESHOLD
 
 # Reverse mappings for label-encoded categoricals
 # (pandas cat.codes sorts alphabetically)

@@ -2,16 +2,18 @@ package gold
 
 import "testing"
 
-// Reads the real Gold test parquet and sanity-checks shapes and values
-// against known properties of the dataset.
+// Reads the committed Gold sample (200 rows of the real test parquet,
+// written by scripts/generate_model_fixtures.py) and sanity-checks
+// shapes and values against known properties of the dataset.
 func TestReadColumns(t *testing.T) {
-	frame, err := ReadColumns("../../../data/gold/features_test.parquet",
+	frame, err := ReadColumns("testdata/sample.parquet",
 		[]string{"loan_amnt", "fico_score", "default", "emp_length"})
 	if err != nil {
-		t.Skipf("gold parquet not available: %v", err)
+		t.Fatalf("gold sample missing (regenerate with "+
+			"scripts/generate_model_fixtures.py): %v", err)
 	}
-	if frame.NumRows != 145841 {
-		t.Errorf("rows: got %d want 145841", frame.NumRows)
+	if frame.NumRows != 200 {
+		t.Errorf("rows: got %d want 200", frame.NumRows)
 	}
 	for name, col := range frame.Columns {
 		if len(col) != frame.NumRows {

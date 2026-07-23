@@ -1,0 +1,16 @@
+{
+  "_comment": "Single source of truth for thresholds shared by the Go services (go:embed in shared/config), the Python pipeline (pipeline/config.py), and the UI (ui/core.py). tests/test_contract.py and shared/config/config_test.go enforce consistency.",
+  "decision": {
+    "approve_below": 0.15,
+    "review_below": 0.30
+  },
+  "monitoring": {
+    "psi_warning": 0.10,
+    "psi_critical": 0.25,
+    "csi_threshold": 0.20,
+    "auc_drop_threshold": 0.03
+  },
+  "fairness": {
+    "dir_threshold": 0.80
+  }
+}

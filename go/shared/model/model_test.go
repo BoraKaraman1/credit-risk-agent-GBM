@@ -22,9 +22,13 @@ type fixtures struct {
 
 func loadFixtures(t *testing.T) (*Model, *fixtures, [][]float64) {
 	t.Helper()
-	m, err := Load("../../../data/models/champion/model.json")
+	// The committed parity model (scripts/generate_model_fixtures.py):
+	// a hard failure, never a skip, so CI always verifies Go<->Python
+	// parity instead of silently going green without it.
+	m, err := Load("testdata/parity_model.json")
 	if err != nil {
-		t.Skipf("champion model.json not available: %v", err)
+		t.Fatalf("parity model missing or unreadable (regenerate with "+
+			"scripts/generate_model_fixtures.py): %v", err)
 	}
 
 	data, err := os.ReadFile("testdata/fixtures.json")
@@ -73,7 +77,7 @@ func TestPredictProbaBatch(t *testing.T) {
 func TestCalibratedPDMatchesSklearn(t *testing.T) {
 	m, fx, rows := loadFixtures(t)
 	if m.Calibration == nil || len(fx.CalibratedPD) == 0 {
-		t.Skip("model or fixtures lack calibration (rerun pipeline/calibrate.py and regenerate fixtures)")
+		t.Fatal("parity model or fixtures lack calibration (regenerate with scripts/generate_model_fixtures.py)")
 	}
 	for i, row := range rows {
 		got := m.Calibration.Apply(m.PredictProba(row))
@@ -86,7 +90,7 @@ func TestCalibratedPDMatchesSklearn(t *testing.T) {
 func TestScaledScoreMatchesPython(t *testing.T) {
 	m, fx, rows := loadFixtures(t)
 	if m.Calibration == nil || m.Scorecard == nil || len(fx.ScaledScore) == 0 {
-		t.Skip("model or fixtures lack scorecard (rerun pipeline/calibrate.py and regenerate fixtures)")
+		t.Fatal("parity model or fixtures lack scorecard (regenerate with scripts/generate_model_fixtures.py)")
 	}
 	for i, row := range rows {
 		pd := m.Calibration.Apply(m.PredictProba(row))

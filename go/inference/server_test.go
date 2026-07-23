@@ -11,9 +11,10 @@ import (
 // positive SHAP contributions, descending, at most 4, with display
 // names applied.
 func TestComputeAdverseActions(t *testing.T) {
-	m, err := model.Load("../../../data/models/champion/model.json")
+	m, err := model.Load("../shared/model/testdata/parity_model.json")
 	if err != nil {
-		t.Skipf("champion model.json not available: %v", err)
+		t.Fatalf("parity model missing (regenerate with "+
+			"scripts/generate_model_fixtures.py): %v", err)
 	}
 
 	// A deliberately risky applicant profile (raw feature order).
