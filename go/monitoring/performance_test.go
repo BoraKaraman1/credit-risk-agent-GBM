@@ -1,6 +1,36 @@
 package monitoring
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/shared/config"
+)
+
+func TestRetrainSignals(t *testing.T) {
+	t.Run("drift critical retrains", func(t *testing.T) {
+		needs, reasons := driftRetrainSignal("CRITICAL", 0.31)
+		if !needs || len(reasons) != 1 || !strings.Contains(reasons[0], "psi_critical") {
+			t.Errorf("needs=%v reasons=%v", needs, reasons)
+		}
+	})
+	t.Run("drift warning does not retrain", func(t *testing.T) {
+		if needs, reasons := driftRetrainSignal("WARNING", 0.15); needs || len(reasons) != 0 {
+			t.Errorf("needs=%v reasons=%v", needs, reasons)
+		}
+	})
+	t.Run("auc drop over threshold retrains", func(t *testing.T) {
+		needs, reasons := performanceRetrainSignal(config.AUCDropThreshold + 0.01)
+		if !needs || len(reasons) != 1 || !strings.Contains(reasons[0], "auc_drop") {
+			t.Errorf("needs=%v reasons=%v", needs, reasons)
+		}
+	})
+	t.Run("auc drop under threshold does not", func(t *testing.T) {
+		if needs, reasons := performanceRetrainSignal(config.AUCDropThreshold - 0.01); needs || len(reasons) != 0 {
+			t.Errorf("needs=%v reasons=%v", needs, reasons)
+		}
+	})
+}
 
 func TestBaselineAUC(t *testing.T) {
 	cases := []struct {

@@ -34,6 +34,19 @@ type driftReport struct {
 	CSIResults             map[string]float64 `json:"csi_results"`
 	DriftedFeatures        map[string]float64 `json:"drifted_features"`
 	Recommendation         string             `json:"recommendation"`
+	// Machine-readable verdict consumed by the monitoring DAG's branch
+	// (dags/credit_risk_monitoring.py); the prose above is for humans.
+	NeedsRetrain   bool     `json:"needs_retrain"`
+	RetrainReasons []string `json:"retrain_reasons"`
+}
+
+// driftRetrainSignal is the machine half of the drift verdict: retrain
+// on a CRITICAL score-distribution shift.
+func driftRetrainSignal(psiStatus string, psi float64) (bool, []string) {
+	if psiStatus == "CRITICAL" {
+		return true, []string{fmt.Sprintf("psi_critical (%.4f)", psi)}
+	}
+	return false, []string{}
 }
 
 func runDrift(ctx context.Context) (*driftReport, error) {
@@ -144,6 +157,7 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		slog.Info(fmt.Sprintf("no individual features above CSI threshold (%.2f)", config.CSIThreshold))
 	}
 
+	needsRetrain, retrainReasons := driftRetrainSignal(psiStatus, psi)
 	rep := &driftReport{
 		Timestamp:              time.Now().UTC().Format(time.RFC3339),
 		ModelVersion:           m.Version,
@@ -156,6 +170,8 @@ func runDrift(ctx context.Context) (*driftReport, error) {
 		CSIResults:             csiResults,
 		DriftedFeatures:        drifted,
 		Recommendation:         driftRecommendation(psi, psiStatus, csiResults),
+		NeedsRetrain:           needsRetrain,
+		RetrainReasons:         retrainReasons,
 	}
 
 	if database != nil {

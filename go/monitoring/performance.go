@@ -31,6 +31,19 @@ type performanceReport struct {
 	RankOrderBreaks int                           `json:"rank_order_breaks"`
 	DecileAnalysis  []metrics.Decile              `json:"decile_analysis"`
 	Recommendation  string                        `json:"recommendation"`
+	// Machine-readable verdict consumed by the monitoring DAG's branch
+	// (dags/credit_risk_monitoring.py); the prose above is for humans.
+	NeedsRetrain   bool     `json:"needs_retrain"`
+	RetrainReasons []string `json:"retrain_reasons"`
+}
+
+// performanceRetrainSignal is the machine half of the performance
+// verdict: retrain when the AUC drop crosses the contract threshold.
+func performanceRetrainSignal(aucDrop float64) (bool, []string) {
+	if aucDrop > config.AUCDropThreshold {
+		return true, []string{fmt.Sprintf("auc_drop (%.4f)", aucDrop)}
+	}
+	return false, []string{}
 }
 
 func runPerformance(ctx context.Context) (*performanceReport, error) {
@@ -101,6 +114,7 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 			DecileAnalysis:  []metrics.Decile{},
 			Recommendation: "INSUFFICIENT OUTCOMES. Both default and non-default outcomes " +
 				"are required to compute AUC/KS; skipping this cohort.",
+			RetrainReasons: []string{},
 		}, nil
 	}
 
@@ -135,6 +149,7 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 			Recommendation: "INSUFFICIENT BASELINE. The champion export records no test/val " +
 				"AUC to compare against; re-export the model (pipeline/export_model_json.py). " +
 				"Degradation check skipped.",
+			RetrainReasons: []string{},
 		}, nil
 	}
 	aucDrop := trainAUC - currentAUC
@@ -142,6 +157,7 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 	slog.Info(fmt.Sprintf("Current AUC=%.4f  Training AUC=%.4f  Drop=%.4f", currentAUC, trainAUC, aucDrop))
 	slog.Info(fmt.Sprintf("Rank-ordering breaks: %d", rankOrderBreaks))
 
+	needsRetrain, retrainReasons := performanceRetrainSignal(aucDrop)
 	rep := &performanceReport{
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 		ModelVersion:    m.Version,
@@ -154,6 +170,8 @@ func runPerformance(ctx context.Context) (*performanceReport, error) {
 		RankOrderBreaks: rankOrderBreaks,
 		DecileAnalysis:  decileStats,
 		Recommendation:  performanceRecommendation(aucDrop, rankOrderBreaks, currentMetrics),
+		NeedsRetrain:    needsRetrain,
+		RetrainReasons:  retrainReasons,
 	}
 
 	if database != nil {

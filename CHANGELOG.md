@@ -1,5 +1,49 @@
 # Changelog
 
+## [2.2.0] - 2026-07-23
+
+### Overview
+
+Governance unification release. An architecture review found the system's central claim (deterministic, fail-closed, auditable promotion) contradicted by its own orchestration: the monthly DAG wrote the champion directly, bypassing every gate, and the control loop failed open exactly where the README claimed fail-closed. This release makes `gbm promote` the single door to `champion/`, repairs the reject-inference path (which crashed on execution), makes the monitors and gates fail closed, and adds CI smoke runs that actually execute every Docker image (three of five were previously unrunnable).
+
+---
+
+### Changed
+
+#### Single promotion door (`pipeline/train.py`, `dags/credit_risk_pipeline.py`, `go/monitoring/promote.go`)
+- `train.py` always produces a **challenger** with its model card (`challenger/model_card.md`); the champion is only ever created by `gbm promote`, which copies the reviewed card into the immutable version dir. The monthly DAG trains a challenger and never touches `champion/`.
+- Python registry writers now take the same flock as `gbm retrain`/`gbm promote` (`io_utils.registry_lock()` on `models/.registry.lock`, flock(2)-compatible across languages) and refuse to write through the promoted-champion symlink (`config.assert_mutable_model_dir`).
+- `gbm promote` POSTs `/reload` to `SCORING_API_URL` after the swap (best-effort, loudly logged), so promotion propagates to serving without waiting for a restart.
+- Reject inference is sequenced after export in the DAG (both write the challenger slot) and the standalone fairness task skips gracefully until a champion exists.
+
+#### Reject inference repair (`pipeline/reject_inference.py`)
+- Removed a call to a function that did not exist (`fairness.reweigh_weights`); the path had never been executed, and a smoke test now runs it end to end on synthetic data.
+- Version strings unified: `config.parse_version`/`next_version` (suffix-tolerant, mirrored by Go's `nextVersion`) so a promoted `v1.2-ri` champion bumps to `v1.3` instead of crashing `train.py`.
+- The isotonic calibrator is fit on **observed outcomes only**; pseudo-labeled rows are excluded from the calibration carve-out.
+- Metadata records test metrics under the `test` key only (previously duplicated under a fabricated `train` key), and the module documents the accepted-set evaluation limitation openly.
+
+#### Fail-closed control loop (`go/monitoring/`, `pipeline/model_card.py`)
+- Drift/performance monitors fail the run when a **configured** database is unreachable instead of silently falling back to the test set; reports carry an explicit source label.
+- Missing baseline metrics produce `INSUFFICIENT BASELINE` instead of "performance stable"; a missing challenger fairness summary **blocks** the retrain gate; the training-result JSON is validated for required fields.
+- `_validation_status` fails closed on a missing fairness block, and challenger verdicts are **champion-relative** (same rule as the Go retrain gate, `dir_worsen_tolerance` now in `contract.json`), keyed strictly on the challenger dir so a champion can never self-approve. The retrain gate, the promote gate, and the exported `validation_status` now share one semantics.
+
+#### CI that runs what it builds (`.github/workflows/ci.yml`, Dockerfiles)
+- The pipeline, Airflow, and test images now carry `go/shared/config/contract.json` (loaded eagerly by `pipeline/config.py`; the images previously crashed on import). `Dockerfile.test` also gained `ui/ dags/ agents/ pytest.ini`; its pytest CMD could not run before.
+- Every image in the CI matrix (now including `Dockerfile.ui`) is built with `load: true` and **smoke-run**; ruff covers `ui/` and `agents/`.
+
+#### One retrain rule (`go/monitoring/drift.go`, `performance.go`, `dags/credit_risk_monitoring.py`)
+- Monitors publish machine-readable `needs_retrain`/`retrain_reasons`; the DAG branch consumes only those (its duplicated threshold logic, including a hardcoded `0.03`, is gone).
+
+---
+
+### Tests
+
+- Python: 79 → 169 (registry lock exclusion incl. cross-language flock semantics, version helpers, symlink guard, champion-relative validation status, reject-inference smoke + calibration masking, DAG branch verdicts).
+- Go: promote reload (httptest), fail-closed fairness gate, `nextVersion` suffix table, `baselineAUC`, retrain signals.
+- In-image pytest suite verified: `docker run` of the test image passes 164 tests (previously failed at collection).
+
+---
+
 ## [2.1.0] - 2026-06-13
 
 ### Overview

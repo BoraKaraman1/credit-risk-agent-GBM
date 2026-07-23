@@ -394,9 +394,9 @@ outcome_backfill → performance_monitor ┐
 
 Retraining triggers automatically when:
 - PSI status is CRITICAL (score distribution shift)
-- AUC drop exceeds the configured threshold (0.03)
+- AUC drop exceeds the contract threshold (0.03)
 
-The monitor tasks shell out to the Go binaries, parse their JSON reports, and route them through XCom; the retrain reason is passed via XCom so the orchestrator logs why it was triggered. The closing `llm_review` task writes the advisory memo described above and never blocks the loop.
+The retrain rule has exactly one implementation: the Go monitors compute it (thresholds from `contract.json`) and publish it as machine-readable `needs_retrain` / `retrain_reasons` fields in their JSON reports. The DAG's branch task only reads those fields and routes the reason through XCom; no thresholds live in the DAG. The closing `llm_review` task writes the advisory memo described above and never blocks the loop.
 
 ### Running Airflow locally
 
@@ -537,12 +537,14 @@ source .venv/bin/activate
 python -m pytest -q
 ```
 
-79 tests across 4 modules:
+169 tests across 10 modules (a handful of DAG tests need an Airflow install and run in the `airflow-dags` CI job), including:
 
-- `test_pipeline.py` — Silver parsing, target mapping, Gold feature engineering
-- `test_features.py` — Reject inference alignment, pseudo-labeling, model comparison
+- `test_pipeline.py` — Silver parsing, target mapping, Gold feature engineering, registry version helpers, the promoted-champion immutability guard
+- `test_features.py` — Reject inference alignment, pseudo-labeling, model comparison, and a smoke test executing the full augmented-training path
 - `test_fairness.py` — Disparate impact, equal opportunity, statistical parity metrics
 - `test_data_quality.py` — Bronze/Silver/Gold validation with valid and invalid data
+- `test_model_card.py` — Validation verdicts, including the champion-relative fairness rule
+- `test_io_utils.py` — Atomic writes and the cross-language registry lock
 
 Go suite (serving layer):
 

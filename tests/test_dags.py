@@ -87,3 +87,45 @@ def test_monitoring_dag_structure():
     task_ids = {t.task_id for t in dag.tasks}
     assert {"outcome_backfill", "drift_monitor", "performance_monitor",
             "decide_retrain", "retrain"} <= task_ids
+
+
+class _StubTI:
+    """Minimal TaskInstance stand-in for branch-callable unit tests."""
+
+    def __init__(self, reports):
+        self._reports = reports
+        self.pushed = {}
+
+    def xcom_pull(self, task_ids, key=None):
+        return self._reports.get(task_ids)
+
+    def xcom_push(self, key, value):
+        self.pushed[key] = value
+
+
+def test_decide_retrain_consumes_go_verdicts():
+    # The DAG module imports airflow at module level, so this unit test
+    # runs only where Airflow is installed (the CI airflow-dags job).
+    pytest.importorskip("airflow", reason="airflow not installed")
+    from dags.credit_risk_monitoring import _decide_retrain
+
+    ti = _StubTI({
+        "drift_monitor": {"needs_retrain": True,
+                          "retrain_reasons": ["psi_critical (0.3100)"]},
+        "performance_monitor": {"needs_retrain": True,
+                                "retrain_reasons": ["auc_drop (0.0400)"]},
+    })
+    assert _decide_retrain(ti=ti) == "retrain"
+    assert ti.pushed["retrain_reason"] == "psi_critical (0.3100), auc_drop (0.0400)"
+
+
+def test_decide_retrain_skips_when_monitors_are_calm():
+    pytest.importorskip("airflow", reason="airflow not installed")
+    from dags.credit_risk_monitoring import _decide_retrain
+
+    ti = _StubTI({
+        "drift_monitor": {"needs_retrain": False, "retrain_reasons": []},
+        "performance_monitor": None,  # e.g. task skipped
+    })
+    assert _decide_retrain(ti=ti) == "skip_retrain"
+    assert "retrain_reason" not in ti.pushed

@@ -84,25 +84,21 @@ def _run_performance_monitor(**kwargs):
 
 
 def _decide_retrain(**kwargs):
-    """Decide whether to trigger retraining based on drift and performance reports."""
+    """Route on the monitors' machine-readable verdicts. The retrain
+    rule has exactly one implementation — the Go monitors, thresholds
+    from contract.json — and this branch only reads their
+    needs_retrain/retrain_reasons fields."""
     ti = kwargs["ti"]
     drift_report = ti.xcom_pull(task_ids="drift_monitor", key="drift_report")
     perf_report = ti.xcom_pull(task_ids="performance_monitor", key="perf_report")
 
-    needs_retrain = False
-    reason_parts = []
+    reasons = []
+    for report in (drift_report, perf_report):
+        if report and report.get("needs_retrain"):
+            reasons.extend(report.get("retrain_reasons", []))
 
-    if drift_report and drift_report.get("psi_status") == "CRITICAL":
-        needs_retrain = True
-        reason_parts.append(f"psi_critical ({drift_report['psi']:.4f})")
-
-    if perf_report and perf_report.get("auc_drop", 0) > perf_report.get("auc_drop_threshold", 0.03):
-        needs_retrain = True
-        reason_parts.append(f"auc_drop ({perf_report['auc_drop']:.4f})")
-
-    if needs_retrain:
-        reason = ", ".join(reason_parts)
-        ti.xcom_push(key="retrain_reason", value=reason)
+    if reasons:
+        ti.xcom_push(key="retrain_reason", value=", ".join(reasons))
         return "retrain"
     return "skip_retrain"
 
