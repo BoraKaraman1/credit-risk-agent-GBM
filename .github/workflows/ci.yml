@@ -74,14 +74,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements/*.txt
       - name: Install Airflow and pipeline dependencies
-        # Airflow first, under its official constraints (keep the version
-        # in sync with requirements/airflow.txt and Dockerfile.airflow),
-        # then the pipeline test stack on top.
         run: |
           python -m pip install --upgrade pip
-          pip install "apache-airflow==2.8.4" \
+          pip install "apache-airflow==2.8.4" -r requirements/pipeline.txt \
             --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.8.4/constraints-3.11.txt"
-          pip install -c requirements/constraints.txt -r requirements/test.txt
+          pip install "pytest>=8.0"
       - name: Parse and validate DAGs
         run: python -m pytest tests/test_dags.py -q
 
