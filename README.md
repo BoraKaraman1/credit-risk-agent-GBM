@@ -8,7 +8,7 @@
 
 Credit risk pipeline built on Lending Club data (2.3M+ loans). It runs a Bronze/Silver/Gold medallion architecture, trains a LightGBM model, serves scores through a real-time API with SHAP-based adverse action reasons, monitors for drift, runs fairness analysis, and orchestrates everything through Airflow. All on free-tier infrastructure.
 
-**Python** owns everything that needs the scientific stack: data prep, LightGBM training, fairness analysis, Great Expectations, and Airflow DAG definitions. **Go** owns the serving layer (`go/`): the scoring API, drift/performance monitors, retrain orchestration, and feature-store sync. After training, the model is exported to a library-agnostic JSON tree format (`pipeline/export_model_json.py`); Go runs inference and TreeSHAP natively with no Python at serving time. Predictions match LightGBM to 1e-9 and SHAP values match the `shap` library to 1e-6.
+**Python** owns everything that needs the scientific stack: data prep, LightGBM training, fairness analysis, data-quality validation, and Airflow DAG definitions. **Go** owns the serving layer (`go/`): the scoring API, drift/performance monitors, retrain orchestration, and feature-store sync. After training, the model is exported to a library-agnostic JSON tree format (`pipeline/export_model_json.py`); Go runs inference and TreeSHAP natively with no Python at serving time. Predictions match LightGBM to 1e-9 and SHAP values match the `shap` library to 1e-6.
 
 ## Architecture
 
@@ -23,16 +23,16 @@ Credit risk pipeline built on Lending Club data (2.3M+ loans). It runs a Bronze/
 LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 ┌─────────────────────────┐          ┌─────────────────┐        ┌────────────┐
 │ data/                   │          │ applicant_feats │───────>│ POST /score│
-│   bronze/  (raw)        │──[GX]──> │ scoring_log     │        │ pure-Go    │
+│   bronze/  (raw)        │──[DQ]──> │ scoring_log     │        │ pure-Go    │
 │   silver/  (clean)      │─ sync ──>│ drift_log       │        │ GBM + SHAP │
 │   gold/    (features)   │  (Go)    │ training_dist   │        └────────────┘
-│   models/  (champion)   │──[GX]──> └─────────────────┘              │
+│   models/  (champion)   │──[DQ]──> └─────────────────┘              │
 └─────────────────────────┘                 ▲                         │
          │                          Monitoring Agents (Go) ───────────┘
          └── Fairness Analysis      (drift, performance, retrain)
              (DIR, EOD, SPD)
 
-[GX] = Great Expectations data quality validation at each layer
+[DQ] = data quality validation gate at each layer (pipeline/data_quality.py)
 ```
 
 ## Stack
@@ -45,7 +45,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 | Serving | Go 1.26, pure-Go GBM inference from a JSON model export |
 | API | Go `net/http` (`gbm serve`, `go/inference`) |
 | Orchestration | Apache Airflow |
-| Data quality | Great Expectations |
+| Data quality | Pure-pandas validation gates (`pipeline/data_quality.py`) |
 | Experiment tracking | MLflow (local) |
 | Interpretability | TreeSHAP (adverse action reasons): Python `shap` for analysis, pure-Go implementation at serving time |
 | Fairness | Disparate Impact, Equal Opportunity, Statistical Parity |
@@ -64,7 +64,7 @@ LOCAL FILESYSTEM (medallion)          SUPABASE POSTGRES          REST API (Go)
 │   ├── export_model_json.py      # Trained model → model.json for the Go runtime
 │   ├── reject_inference.py       # Selection bias correction via parcelling
 │   ├── fairness.py               # Fairness analysis (DIR, EOD, SPD)
-│   ├── data_quality.py           # Great Expectations validation suites
+│   ├── data_quality.py           # Data-quality validation gates (pure pandas)
 │   └── supabase_schema.sql       # Database DDL
 ├── go/                           # Serving layer (see go/README.md)
 │   ├── main.go                   # single `gbm` binary; dispatches subcommands
@@ -386,6 +386,17 @@ Retraining triggers automatically when:
 
 The monitor tasks shell out to the Go binaries, parse their JSON reports, and route them through XCom; the retrain reason is passed via XCom so the orchestrator logs why it was triggered. The closing `llm_review` task writes the advisory memo described above and never blocks the loop.
 
+### Running Airflow locally
+
+The compose stack includes a single-container Airflow (standalone mode) under the `orchestration` profile. The image ships only code; the medallion data and model registry are mounted from `./data` (the compose file does this for you):
+
+```bash
+docker compose --profile orchestration up airflow
+# UI at http://localhost:8080 — the admin password is printed in the logs
+```
+
+DAG integrity is enforced in CI: `tests/test_dags.py` resolves every lazy import inside task callables (no Airflow needed) and parses both DAGs with a real Airflow install in the `airflow-dags` job.
+
 ## Fairness Analysis
 
 Evaluates model fairness across three proxy-protected attributes:
@@ -423,7 +434,7 @@ python pipeline/model_card.py data/models/champion docs/model_card.md
 
 ## Data Quality Validation
 
-Great Expectations validates data at each medallion layer:
+Pure-pandas validation checks (`pipeline/data_quality.py`) gate each medallion layer:
 
 | Layer | Key Checks |
 |-------|-----------|
@@ -431,7 +442,7 @@ Great Expectations validates data at each medallion layer:
 | Silver | Core columns non-null, FICO 300-850, income >= 0, DTI 0-100, binary target, default rate 5-50% |
 | Gold | All 33 features present, `grade_numeric` 1-7, `sub_grade_numeric` 1-35, binary flags 0/1, row count > 1000 |
 
-Validation runs automatically at the end of each pipeline step. Great Expectations is optional; the pipeline still works without it.
+Validation runs before each layer's artifact is written: in strict mode (`CREDIT_RISK_STRICT_DQ=true`, set in the pipeline and Airflow images) a failure aborts the step and nothing is persisted; otherwise it logs a warning.
 
 ```bash
 # Validate existing Gold data manually
@@ -537,5 +548,5 @@ The Go tests cross-check against fixtures generated by the Python stack: sklearn
 - **SHAP for adverse actions**: TreeSHAP provides exact, model-consistent explanations, more reliable than surrogate models or generic reason-code tables for ECOA compliance. The serving implementation is pure Go, verified to 1e-6 against the Python `shap` library.
 - **Go serving layer**: The model is exported to a JSON tree format once after training; the API and monitors run inference natively. Serving images drop the scientific-Python stack entirely (one static binary on a slim base) while training stays in Python. Superseded Python services are kept in `backup_python/` for reference.
 - **Fairness via proxy attributes**: Direct protected classes (race, gender) are unavailable in the data. Analysis uses proxy attributes (home ownership, verification status, employment reporting) to detect potential disparate impact.
-- **Data quality as optional dependency**: Great Expectations validation is wrapped in `try/except ImportError` so the core pipeline works without it. Useful for lightweight dev environments.
+- **Data quality as a hard gate**: Validation is pure pandas (no extra dependency), always imported, and runs before each layer's artifact is written, so a strict-mode failure can never leave rejected data persisted for downstream consumers.
 - **joblib over pickle**: Faster and smaller than pickle for numpy-heavy sklearn models, and the serialization method scikit-learn recommends. Backward-compatible fallback to `.pkl` for pre-migration models.

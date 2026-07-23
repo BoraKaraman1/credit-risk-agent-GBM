@@ -23,14 +23,24 @@ ENV PYTHONPATH=/opt/airflow \
     CREDIT_RISK_STRICT_DQ=true \
     PYTHON_BIN=python
 
-# Pin pipeline deps to known-good versions (constraints.txt) so the image
-# build is reproducible and does not silently pull untested upgrades onto
-# the pinned apache/airflow base. (Reconciling these against Airflow's own
-# constraints file requires moving to an Airflow release compatible with
-# great-expectations >= 1.0; tracked as a follow-up.)
-COPY requirements/base.txt requirements/pipeline.txt requirements/agent.txt requirements/constraints.txt /tmp/requirements/
+# Install pipeline deps under Airflow's official constraints so shared
+# libraries (SQLAlchemy, Flask, pandas) stay at the versions the pinned
+# apache/airflow base was tested with. The repo-wide constraints.txt
+# pins SQLAlchemy 2.x / Flask 3.x, which break Airflow 2.8 at runtime.
+ARG AIRFLOW_CONSTRAINTS=https://raw.githubusercontent.com/apache/airflow/constraints-2.8.4/constraints-3.11.txt
+COPY requirements/base.txt requirements/pipeline.txt requirements/agent.txt /tmp/requirements/
+RUN pip install --no-cache-dir -c ${AIRFLOW_CONSTRAINTS} \
+    -r /tmp/requirements/pipeline.txt
+# The scientific stack must then be lifted to the repo pins
+# (constraints.txt): model artifacts pickled under numpy 2 by local or
+# pipeline-image runs cannot be loaded under the numpy 1.x that
+# Airflow's constraint set pins. Airflow's web stack (SQLAlchemy,
+# Flask) stays at the base image versions. The advisory review agent
+# rides along here because it needs httpx newer than Airflow's pin.
+COPY requirements/constraints.txt /tmp/requirements/
 RUN pip install --no-cache-dir -c /tmp/requirements/constraints.txt \
-    -r /tmp/requirements/pipeline.txt -r /tmp/requirements/agent.txt
+    numpy pandas pyarrow scikit-learn scipy lightgbm joblib \
+    && pip install --no-cache-dir -r /tmp/requirements/agent.txt
 
 COPY --chown=airflow:0 dags/ /opt/airflow/dags/
 COPY --chown=airflow:0 pipeline/ /opt/airflow/pipeline/

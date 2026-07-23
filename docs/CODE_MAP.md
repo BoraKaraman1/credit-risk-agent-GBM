@@ -18,8 +18,8 @@ weekly model-risk memos but never gates anything.
 |---|---|
 | `pipeline/__init__.py` | Empty package marker. |
 | `pipeline/config.py` | Central config: path helpers for bronze/silver/gold/models/champion/challenger dirs driven by env vars (`CREDIT_RISK_DATA_DIR`, `CREDIT_RISK_MODELS_DIR`), mirroring `go/shared/config`. Also implements strict data-quality mode (`enforce_data_quality` raises in CI/prod, warns locally). |
-| `pipeline/bronze_ingest.py` | Bronze ingestion: reads raw Lending Club accepted/rejected CSVs with pandas and writes immutable Parquet to `data/bronze/` with `ingested_at`/`source_file` metadata. Skips existing outputs; optionally validates with Great Expectations. CLI: `python pipeline/bronze_ingest.py`. |
-| `pipeline/data_quality.py` | Great Expectations validation for all three layers — row counts, non-null metadata, FICO 300–850, DTI 0–100, binary target, default-rate sanity (5–50%), grade ranges, Gold feature-schema presence. Failures flow into `config.enforce_data_quality`. |
+| `pipeline/bronze_ingest.py` | Bronze ingestion: reads raw Lending Club accepted/rejected CSVs with pandas and writes immutable Parquet to `data/bronze/` with `ingested_at`/`source_file` metadata. Skips existing outputs; validates before writing. CLI: `python pipeline/bronze_ingest.py`. |
+| `pipeline/data_quality.py` | Pure-pandas validation for all three layers — row counts, non-null metadata, FICO 300–850, DTI 0–100, binary target, default-rate sanity (5–50%), grade ranges, Gold feature-schema presence. Runs before each layer's artifact is written; failures flow into `config.enforce_data_quality` (raise in strict mode, warn otherwise). |
 | `pipeline/silver_transform.py` | Bronze → Silver: filters accepted loans to resolved `loan_status` values, builds the binary `default` target, keeps only 25 origination-time columns (explicitly no post-origination leakage), parses `term`/`emp_length`/`int_rate`, derives `credit_history_months` and `fico_score`, applies sentinel/median imputation and quality gates. Also normalizes the rejected-loans file (`default = NaN`) for reject inference. Outputs `accepted_clean.parquet` / `rejected_clean.parquet`. |
 | `pipeline/gold_features.py` | Silver → Gold: engineers the 33-feature space (`log_annual_inc`, `loan_to_income`, `installment_to_income`, `dti_x_income`, ordinal grade/sub-grade, binary flags like `delinq_ever`/`high_utilization`, deterministic persisted category maps with unseen → −1). Performs the time-aware split (train <2016, val 2016–H1 2017, test ≥2017-07) and writes `features_{train,val,test}.parquet` + `feature_metadata.json` (`FEATURE_VERSION=1` schema contract). |
 | `pipeline/train.py` | Champion training: trains `lightgbm.LGBMClassifier` on train+val with a deterministic stratified early-stopping carve-out (the same carve-out later fits the calibrator), evaluates AUC/KS/Gini, logs to MLflow, saves versioned `model.joblib` + `model_metadata.json` into champion (or challenger via `as_challenger=True`), then runs calibration, fairness analysis, and model-card generation. CLI: `python pipeline/train.py`. |
@@ -104,6 +104,7 @@ and uses the `shap` library at serve time, whereas the Go layer consumes
 - **`tests/test_fairness.py`** — Fairness metrics (DIR with 80% threshold, EOD, SPD, `analyze_attribute`, `run`, `summarize`) on synthetic data.
 - **`tests/test_review_agent.py`** — Review agent's deterministic plumbing only (tool validation, prompt assembly, memo/audit writing); no API key required.
 - **`tests/test_ui.py`** — UI pure helpers (`ui/core.py`): frame shaping for fairness/CSI/deciles/history, decision presentation, PSI status; no streamlit or network.
+- **`tests/test_dags.py`** — Airflow DAG integrity: AST-resolves every lazy `from X import Y` inside task callables (no Airflow required), and parses both DAGs via `DagBag` with structure assertions (skipped unless Airflow is installed; CI runs it in the `airflow-dags` job).
 - **`tests/test_calibration.py`** — Scorecard scaling math (base 600@30:1, PDO 20, monotonicity) and isotonic calibration behavior.
 
 ## Repo root & scripts
@@ -120,7 +121,7 @@ and uses the `shap` library at serve time, whereas the Go layer consumes
 
 ## Infra
 
-- **`docker-compose.yml`** — Local dev stack: Postgres 16 (schema from `pipeline/supabase_schema.sql`), the Go scoring API (port 8000), the Streamlit UI (port 8501), optional `monitoring` profile with Prometheus + Grafana. Local-only credentials.
+- **`docker-compose.yml`** — Local dev stack: Postgres 16 (schema from `pipeline/supabase_schema.sql`), the Go scoring API (port 8000), the Streamlit UI (port 8501), optional `orchestration` profile with single-container Airflow standalone (port 8080, `./data` mounted in), optional `monitoring` profile with Prometheus + Grafana. Local-only credentials.
 - **`Dockerfile.airflow`** — Airflow 2.8.4 image with the compiled `gbm` binary embedded (multi-stage Go build) so DAGs can invoke Go jobs via `CREDIT_RISK_GO_BIN`.
 - **`Dockerfile.api`** — Multi-stage build of the `gbm` binary on slim Debian, non-root, `/health` healthcheck; entrypoint `gbm serve` on port 8000.
 - **`Dockerfile.pipeline`** — Python 3.11-slim image running `python pipeline/train.py` as non-root.

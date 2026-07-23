@@ -50,8 +50,9 @@ def _run_train():
 
 
 def _run_export_model():
-    from pipeline.export_model_json import MODELS_DIR, export_model
-    export_model(MODELS_DIR / "champion")
+    from pipeline import config
+    from pipeline.export_model_json import export_model
+    export_model(config.champion_dir())
 
 
 def _run_sync():

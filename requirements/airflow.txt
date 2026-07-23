@@ -1,2 +1,3 @@
 -r pipeline.txt
-apache-airflow>=2.8
+# Pinned to the Dockerfile.airflow base image version.
+apache-airflow==2.8.4

@@ -53,6 +53,29 @@ services:
       start_period: 45s
       retries: 3
 
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    profiles: ["orchestration"]
+    # Single-container dev mode: SQLite metadata DB + LocalExecutor-ish
+    # scheduler + webserver on :8080 (admin password printed in the logs).
+    command: standalone
+    environment:
+      # Used by the gbm tasks (sync, monitors) the DAGs shell out to.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-credit_risk}:${POSTGRES_PASSWORD:-credit_risk}@postgres:5432/${POSTGRES_DB:-credit_risk}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    ports:
+      - "8080:8080"
+    volumes:
+      # The image ships code only (.dockerignore excludes data/); the
+      # medallion layers and model registry live on the host and must be
+      # mounted at the path CREDIT_RISK_DATA_DIR points to.
+      - ./data:/opt/airflow/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:v2.54.1
     profiles: ["monitoring"]

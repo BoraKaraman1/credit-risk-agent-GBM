@@ -1,3 +1,2 @@
 -r base.txt
 mlflow>=2.10
-great_expectations>=1.0

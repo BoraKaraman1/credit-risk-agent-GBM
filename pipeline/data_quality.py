@@ -1,13 +1,12 @@
 """
 Data Quality Module
-Defines Great Expectations validation suites for Bronze, Silver, and Gold layers.
+Pure-pandas validation checks for Bronze, Silver, and Gold layers.
 Returns structured validation results for pipeline integration.
 """
 
 import json
 import logging
 import sys
-import great_expectations as gx
 import pandas as pd
 from pathlib import Path
 
@@ -25,37 +24,6 @@ BINARY_COLUMNS = [
     "delinq_ever", "high_utilization", "has_mortgage",
     "has_bankruptcy", "emp_length_missing",
 ]
-
-
-def _run_expectations(df: pd.DataFrame, expectations: list[dict]) -> list[dict]:
-    """Run a list of expectations against a DataFrame using GX."""
-    context = gx.get_context()
-    data_source = context.data_sources.add_or_update_pandas("pandas_source")
-    data_asset = data_source.add_dataframe_asset(name="validation_asset")
-    batch_definition = data_asset.add_batch_definition_whole_dataframe("batch_def")
-    batch = batch_definition.get_batch(batch_parameters={"dataframe": df})
-
-    results = []
-    for exp in expectations:
-        try:
-            expectation = gx.expectations.registry.get_expectation_impl(
-                exp["type"]
-            )(**exp.get("kwargs", {}))
-            validation = batch.validate(expectation)
-            results.append({
-                "expectation": exp["type"],
-                "kwargs": exp.get("kwargs", {}),
-                "success": validation.success,
-                "observed_value": getattr(validation, "result", {}).get("observed_value"),
-            })
-        except Exception as e:
-            results.append({
-                "expectation": exp["type"],
-                "kwargs": exp.get("kwargs", {}),
-                "success": False,
-                "error": str(e),
-            })
-    return results
 
 
 def validate_bronze(df: pd.DataFrame, source_name: str = "accepted") -> dict:

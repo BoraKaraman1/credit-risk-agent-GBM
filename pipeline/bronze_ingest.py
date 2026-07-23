@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config
+from pipeline.data_quality import validate_bronze
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +40,15 @@ def ingest_accepted():
     df["ingested_at"] = datetime.now(timezone.utc).isoformat()
     df["source_file"] = source.name
 
+    # Validate before writing: a strict-mode failure must not leave a
+    # rejected artifact behind for downstream consumers.
+    result = validate_bronze(df, source_name="accepted")
+    if not result["success"]:
+        config.enforce_data_quality("Bronze (accepted)", str(result))
+
     logger.info(f"Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
     df.to_parquet(dest, index=False, engine="pyarrow")
     logger.info(f"Accepted loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
-
-    try:
-        from pipeline.data_quality import validate_bronze
-        result = validate_bronze(df, source_name="accepted")
-        if not result["success"]:
-            config.enforce_data_quality("Bronze (accepted)", str(result))
-    except ImportError:
-        pass
 
 
 def ingest_rejected():
@@ -68,17 +67,13 @@ def ingest_rejected():
     df["ingested_at"] = datetime.now(timezone.utc).isoformat()
     df["source_file"] = source.name
 
+    result = validate_bronze(df, source_name="rejected")
+    if not result["success"]:
+        config.enforce_data_quality("Bronze (rejected)", str(result))
+
     logger.info(f"Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
     df.to_parquet(dest, index=False, engine="pyarrow")
     logger.info(f"Rejected loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
-
-    try:
-        from pipeline.data_quality import validate_bronze
-        result = validate_bronze(df, source_name="rejected")
-        if not result["success"]:
-            config.enforce_data_quality("Bronze (rejected)", str(result))
-    except ImportError:
-        pass
 
 
 def run():

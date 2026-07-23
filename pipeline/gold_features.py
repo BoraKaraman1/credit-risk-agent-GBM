@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config
+from pipeline.data_quality import validate_gold
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,15 @@ def run():
     logger.info(f"Val:   {len(val):,} (default rate: {val['default'].mean():.4f})")
     logger.info(f"Test:  {len(test):,} (default rate: {test['default'].mean():.4f})")
 
+    # Validate before writing: a strict-mode failure must not leave a
+    # rejected artifact behind for downstream consumers. (The feature-
+    # schema check compares against the previous run's metadata, so it
+    # doubles as a schema-drift alarm.)
+    for name, split_df in [("train", train), ("val", val), ("test", test)]:
+        result = validate_gold(split_df, split_name=name)
+        if not result["success"]:
+            config.enforce_data_quality(f"Gold ({name})", str(result))
+
     # Save splits
     train.to_parquet(GOLD_DIR / "features_train.parquet", index=False)
     val.to_parquet(GOLD_DIR / "features_val.parquet", index=False)
@@ -172,16 +182,6 @@ def run():
 
     logger.info(f"Features: {feature_cols}")
     logger.info(f"Written to {GOLD_DIR}")
-
-    try:
-        from pipeline.data_quality import validate_gold
-        for name, split_df in [("train", train), ("val", val), ("test", test)]:
-            result = validate_gold(split_df, split_name=name)
-            if not result["success"]:
-                config.enforce_data_quality(f"Gold ({name})", str(result))
-    except ImportError:
-        pass
-
     logger.info("Gold feature engineering done.")
 
 

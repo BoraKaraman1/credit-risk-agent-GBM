@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config
+from pipeline.data_quality import validate_silver
 
 logger = logging.getLogger(__name__)
 
@@ -145,17 +146,15 @@ def transform_accepted():
     else:
         logger.info("Quality gate passed: all columns <5% null")
 
+    # Validate before writing: a strict-mode failure must not leave a
+    # rejected artifact behind for downstream consumers.
+    result = validate_silver(df)
+    if not result["success"]:
+        config.enforce_data_quality("Silver", str(result))
+
     logger.info(f"Final accepted: {len(df):,} rows × {len(df.columns)} cols")
     df.to_parquet(dest, index=False, engine="pyarrow")
     logger.info(f"Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
-
-    try:
-        from pipeline.data_quality import validate_silver
-        result = validate_silver(df)
-        if not result["success"]:
-            config.enforce_data_quality("Silver", str(result))
-    except ImportError:
-        pass
 
 
 def transform_rejected():
