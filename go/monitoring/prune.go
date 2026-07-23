@@ -66,7 +66,9 @@ func runPrune(ctx context.Context) (*pruneReport, error) {
 
 func RunPrune() {
 	config.LoadEnv()
-	rep, err := runPrune(context.Background())
+	ctx, cancel := withDeadline(pruneTimeout)
+	defer cancel()
+	rep, err := runPrune(ctx)
 	if err != nil {
 		slog.Error("prune failed", "error", err)
 		os.Exit(1)

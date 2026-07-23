@@ -282,7 +282,7 @@ func TestHandleScoreValidation(t *testing.T) {
 }
 
 func TestHandleScoreBatchValidation(t *testing.T) {
-	s := &server{model: syntheticAPIModel()}
+	s := &server{model: syntheticAPIModel(), limiter: newRateLimiter(100, 100)}
 	t.Run("invalid json", func(t *testing.T) {
 		rec := postJSON(t, s.handleScoreBatch, `{nope`)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -354,7 +354,7 @@ func TestHandleScoreTrailingData(t *testing.T) {
 }
 
 func TestHandleScoreBatchLimits(t *testing.T) {
-	s := &server{model: syntheticAPIModel()}
+	s := &server{model: syntheticAPIModel(), limiter: newRateLimiter(100, 100)}
 	t.Run("empty list is 422", func(t *testing.T) {
 		rec := postJSON(t, s.handleScoreBatch, `{"applicant_ids":[]}`)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -372,6 +372,36 @@ func TestHandleScoreBatchLimits(t *testing.T) {
 			t.Errorf("status = %d, want 413", rec.Code)
 		}
 	})
+}
+
+// A batch is N scoring decisions, not one request: each scored applicant
+// must consume a rate-limit token, or /score/batch is a maxBatchSize
+// multiplier on every client's allowance.
+func TestHandleScoreBatchChargesPerApplicant(t *testing.T) {
+	t.Setenv("DATABASE_URL", "") // scoring itself fails fast; tokens still burn
+	// burst=2, no refill: the first two applicants consume the bucket.
+	s := &server{model: syntheticAPIModel(), limiter: newRateLimiter(0.0001, 2)}
+	rec := postJSON(t, s.handleScoreBatch, `{"applicant_ids": ["LC_1", "LC_2", "LC_3", "LC_4"]}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 once the bucket empties", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("429 without Retry-After header")
+	}
+	var resp batchScoreResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	// First two attempted (DB error), remaining two failed fast on the limiter.
+	if len(resp.Errors) != 4 {
+		t.Fatalf("errors = %d, want 4 (2 DB + 2 rate-limited)", len(resp.Errors))
+	}
+	if resp.Errors[2].Error != "rate limit exceeded" || resp.Errors[3].Error != "rate limit exceeded" {
+		t.Errorf("tail errors = %+v, want rate-limit failures for LC_3/LC_4", resp.Errors[2:])
+	}
+	if resp.Errors[2].ApplicantID != "LC_3" || resp.Errors[3].ApplicantID != "LC_4" {
+		t.Errorf("rate-limited IDs = %+v, want LC_3/LC_4 in order", resp.Errors[2:])
+	}
 }
 
 func TestCheckModelGovernance(t *testing.T) {

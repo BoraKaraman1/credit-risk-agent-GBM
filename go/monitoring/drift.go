@@ -216,7 +216,9 @@ func driftRecommendation(psi float64, psiStatus string, csiResults map[string]fl
 
 func RunDrift() {
 	config.LoadEnv()
-	rep, err := runDrift(context.Background())
+	ctx, cancel := withDeadline(driftTimeout)
+	defer cancel()
+	rep, err := runDrift(ctx)
 	if err != nil {
 		slog.Error("drift monitor failed", "error", err)
 		os.Exit(1)

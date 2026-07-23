@@ -185,7 +185,9 @@ func performanceRecommendation(aucDrop float64, rankBreaks int, current map[stri
 
 func RunPerformance() {
 	config.LoadEnv()
-	rep, err := runPerformance(context.Background())
+	ctx, cancel := withDeadline(performanceTimeout)
+	defer cancel()
+	rep, err := runPerformance(ctx)
 	if err != nil {
 		slog.Error("performance monitor failed", "error", err)
 		os.Exit(1)

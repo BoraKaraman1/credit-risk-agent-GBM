@@ -123,7 +123,9 @@ func runBackfill(ctx context.Context) (*backfillReport, error) {
 
 func RunBackfill() {
 	config.LoadEnv()
-	rep, err := runBackfill(context.Background())
+	ctx, cancel := withDeadline(backfillTimeout)
+	defer cancel()
+	rep, err := runBackfill(ctx)
 	if err != nil {
 		slog.Error("outcome backfill failed", "error", err)
 		os.Exit(1)

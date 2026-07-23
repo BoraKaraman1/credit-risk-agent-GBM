@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config
 from pipeline.data_quality import validate_silver
+from pipeline.io_utils import atomic_write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,7 @@ def transform_accepted():
         config.enforce_data_quality("Silver", str(result))
 
     logger.info(f"Final accepted: {len(df):,} rows × {len(df.columns)} cols")
-    df.to_parquet(dest, index=False, engine="pyarrow")
+    atomic_write_parquet(df, dest)
     logger.info(f"Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
@@ -203,7 +204,7 @@ def transform_rejected():
     df = df.dropna(subset=["loan_amnt", "fico_score"])
 
     logger.info(f"Final rejected: {len(df):,} rows × {len(df.columns)} cols")
-    df.to_parquet(dest, index=False, engine="pyarrow")
+    atomic_write_parquet(df, dest)
     logger.info(f"Written to {dest} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 

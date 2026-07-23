@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config
 from pipeline.data_quality import validate_bronze
+from pipeline.io_utils import atomic_write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def ingest_accepted():
         config.enforce_data_quality("Bronze (accepted)", str(result))
 
     logger.info(f"Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
-    df.to_parquet(dest, index=False, engine="pyarrow")
+    atomic_write_parquet(df, dest)
     logger.info(f"Accepted loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
 
 
@@ -72,7 +73,7 @@ def ingest_rejected():
         config.enforce_data_quality("Bronze (rejected)", str(result))
 
     logger.info(f"Writing {len(df):,} rows × {len(df.columns)} cols → {dest}")
-    df.to_parquet(dest, index=False, engine="pyarrow")
+    atomic_write_parquet(df, dest)
     logger.info(f"Rejected loans ingested. Size: {dest.stat().st_size / 1e6:.1f} MB")
 
 

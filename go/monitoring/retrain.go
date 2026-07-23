@@ -344,7 +344,9 @@ func RunRetrain(reason string) {
 		os.Exit(1)
 	}
 	defer release()
-	rep, err := runRetrain(context.Background(), reason)
+	ctx, cancel := withDeadline(retrainTimeout)
+	defer cancel()
+	rep, err := runRetrain(ctx, reason)
 	if err != nil {
 		slog.Error("retrain orchestrator failed", "error", err)
 		os.Exit(1)

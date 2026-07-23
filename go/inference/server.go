@@ -521,10 +521,24 @@ func (s *server) handleScoreBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := batchScoreResponse{Results: []scoreResponse{}, Errors: []batchError{}}
-	for _, aid := range req.ApplicantIDs {
+	// Charge one rate-limit token per scored applicant: a batch is N
+	// scoring decisions, not one request, so it must not multiply a
+	// client's allowance by up to maxBatchSize. When the bucket empties
+	// mid-batch the remainder fails fast instead of queueing behind a
+	// slow database.
+	limiter := s.limiter.get(clientID(r, s.trustProxy), time.Now())
+	for i, aid := range req.ApplicantIDs {
 		if err := validateApplicantID(aid); err != nil {
 			out.Errors = append(out.Errors, batchError{ApplicantID: aid, Error: err.Error()})
 			continue
+		}
+		if !limiter.Allow() {
+			w.Header().Set("Retry-After", "1")
+			for _, rest := range req.ApplicantIDs[i:] {
+				out.Errors = append(out.Errors, batchError{ApplicantID: rest, Error: "rate limit exceeded"})
+			}
+			writeJSON(w, http.StatusTooManyRequests, out)
+			return
 		}
 		resp, err := s.scoreApplicant(r.Context(), aid)
 		if err != nil {
@@ -673,6 +687,11 @@ func Serve() {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("graceful shutdown failed", "error", err)
 			os.Exit(1)
+		}
+		// Release the feature-store pool after in-flight requests drain so
+		// Postgres isn't left holding idle connections until they time out.
+		if s.db != nil {
+			s.db.Close()
 		}
 		slog.Info("server stopped cleanly")
 	}

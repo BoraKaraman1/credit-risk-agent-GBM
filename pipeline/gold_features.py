@@ -4,7 +4,6 @@ Silver → Gold: engineer derived features, encode categoricals, time-aware spli
 Produces train/val/test Parquet files ready for model training.
 """
 
-import json
 import logging
 import sys
 import pandas as pd
@@ -15,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline import config
 from pipeline.data_quality import validate_gold
+from pipeline.io_utils import atomic_write_json, atomic_write_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +155,9 @@ def run():
             config.enforce_data_quality(f"Gold ({name})", str(result))
 
     # Save splits
-    train.to_parquet(GOLD_DIR / "features_train.parquet", index=False)
-    val.to_parquet(GOLD_DIR / "features_val.parquet", index=False)
-    test.to_parquet(GOLD_DIR / "features_test.parquet", index=False)
+    atomic_write_parquet(train, GOLD_DIR / "features_train.parquet")
+    atomic_write_parquet(val, GOLD_DIR / "features_val.parquet")
+    atomic_write_parquet(test, GOLD_DIR / "features_test.parquet")
 
     # Feature columns (everything except target and the passthrough id)
     feature_cols = [c for c in train.columns if c not in ("default", "id")]
@@ -177,8 +177,7 @@ def run():
         "categorical_encodings": category_maps,
     }
     meta_path = GOLD_DIR / "feature_metadata.json"
-    with open(meta_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+    atomic_write_json(metadata, meta_path)
 
     logger.info(f"Features: {feature_cols}")
     logger.info(f"Written to {GOLD_DIR}")

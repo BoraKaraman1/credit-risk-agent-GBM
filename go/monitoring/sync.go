@@ -140,7 +140,8 @@ func round(x float64, decimals int) float64 {
 
 func RunSync() {
 	config.LoadEnv()
-	ctx := context.Background()
+	ctx, cancel := withDeadline(syncTimeout)
+	defer cancel()
 
 	d, err := db.Connect(ctx, config.DatabaseURL())
 	if err != nil {
