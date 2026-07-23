@@ -268,6 +268,7 @@ Example response (truncated):
   "pd": 0.40562,
   "scaled_score": 512,
   "decision": "decline",
+  "feature_version": 1,
   "adverse_actions": [
     {
       "code": 2,
@@ -286,7 +287,7 @@ Example response (truncated):
 `/score`, `/score/batch`, `/reload`, and `/metrics` require authentication; `/health` stays open. `/metrics` skips the rate limiter so scrapes are not throttled.
 
 - **API keys**: set `API_KEYS` to a comma-separated list. Callers send one in the `X-API-Key` header (or `Authorization: Bearer <key>`), compared in constant time. The API **fails closed**: with no `API_KEYS` it refuses to start unless `ALLOW_UNAUTHENTICATED_DEV=true` is set for local development.
-- **Rate limiting**: a per-client token bucket (`golang.org/x/time/rate`), keyed by API key when authenticated and by client IP otherwise. Defaults are 20 req/s sustained with a burst of 40, tunable via `RATE_LIMIT_RPS` and `RATE_LIMIT_BURST`. Over-budget requests get `429` with a `Retry-After` header.
+- **Rate limiting**: separate per-client token buckets bound request overhead and scoring work. `REQUEST_RATE_LIMIT_RPS` / `REQUEST_RATE_LIMIT_BURST` default to 50/100 per HTTP request, while `SCORING_RATE_LIMIT_RPS` / `SCORING_RATE_LIMIT_BURST` default to 20/40 and charge one token per applicant. Legacy `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` remain scoring-limit fallbacks.
 
 Every request gets an `X-Request-ID` (generated, or the incoming one echoed back) that ties together the structured access logs.
 
@@ -296,7 +297,7 @@ The API runs on an `http.Server` with read, write, and idle timeouts instead of 
 
 ### Audit Logging
 
-Each scoring request writes an audit row to `scoring_log` with the feature snapshot stored as JSONB. Monitoring agents write PSI/AUC summaries to `drift_log`, also with JSONB details. The Go services use pgx parameterized inserts with explicit `::jsonb` casts so Postgres receives valid JSONB values.
+Each scoring request writes the complete decision envelope to `scoring_log` before the decision can be returned or counted in Prometheus. The record includes the request ID, model and feature versions, feature snapshot, raw score, calibrated PD, scaled score, decision, and deduplicated adverse-action reasons. Monitoring agents write PSI/AUC summaries to `drift_log`, also with JSONB details.
 
 ## Monitoring Agents
 

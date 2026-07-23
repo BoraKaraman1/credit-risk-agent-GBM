@@ -132,7 +132,7 @@ func TestAuthMiddlewareBearer(t *testing.T) {
 }
 
 func TestRateLimitMiddleware(t *testing.T) {
-	s := &server{limiter: newRateLimiter(1, 3)} // 1 rps, burst 3
+	s := &server{requestLimiter: newRateLimiter(1, 3)} // 1 rps, burst 3
 	h := s.rateLimitMiddleware(okHandler())
 
 	send := func(ip string) int {
@@ -223,9 +223,17 @@ func TestInstrument(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		req.Header.Set("X-Request-ID", "trace-123")
-		instrument("/health", okHandler()).ServeHTTP(rec, req)
+		var contextID string
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			contextID = requestID(r.Context())
+			w.WriteHeader(http.StatusOK)
+		})
+		instrument("/health", h).ServeHTTP(rec, req)
 		if got := rec.Header().Get("X-Request-ID"); got != "trace-123" {
 			t.Errorf("X-Request-ID = %q, want trace-123", got)
+		}
+		if contextID != "trace-123" {
+			t.Errorf("requestID(ctx) = %q, want trace-123", contextID)
 		}
 	})
 	t.Run("request-scoped logger is available", func(t *testing.T) {

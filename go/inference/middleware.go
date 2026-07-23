@@ -22,6 +22,7 @@ type ctxKey int
 const (
 	loggerKey ctxKey = iota
 	clientKey
+	requestIDKey
 )
 
 // logger returns the request-scoped logger (carrying request_id), or
@@ -31,6 +32,11 @@ func logger(ctx context.Context) *slog.Logger {
 		return l
 	}
 	return slog.Default()
+}
+
+func requestID(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey).(string)
+	return id
 }
 
 // statusWriter captures the response status code for access logging and
@@ -64,6 +70,7 @@ func instrument(endpoint string, next http.Handler) http.Handler {
 
 		log := slog.With("request_id", id, "endpoint", endpoint)
 		ctx := context.WithValue(r.Context(), loggerKey, log)
+		ctx = context.WithValue(ctx, requestIDKey, id)
 
 		sw := &statusWriter{ResponseWriter: w}
 		start := time.Now()
@@ -81,8 +88,8 @@ func instrument(endpoint string, next http.Handler) http.Handler {
 	})
 }
 
-// protect chains API-key authentication and per-client rate limiting in
-// front of a handler.
+// protect chains API-key authentication and request rate limiting in
+// front of a handler. Scoring operations have their own weighted limiter.
 func (s *server) protect(h http.Handler) http.Handler {
 	return s.authMiddleware(s.rateLimitMiddleware(h))
 }
@@ -187,7 +194,11 @@ func (rl *rateLimiter) get(client string, now time.Time) *rate.Limiter {
 func (s *server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		client := clientID(r, s.trustProxy)
-		if !s.limiter.get(client, time.Now()).Allow() {
+		if s.requestLimiter == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.requestLimiter.get(client, time.Now()).Allow() {
 			logger(r.Context()).Warn("rate limit exceeded", "client", client)
 			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"detail": "rate limit exceeded"})

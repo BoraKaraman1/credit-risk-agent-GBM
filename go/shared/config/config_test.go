@@ -88,35 +88,74 @@ func TestAPIKeys(t *testing.T) {
 	})
 }
 
-func TestRateLimit(t *testing.T) {
+func TestRequestRateLimit(t *testing.T) {
 	t.Run("defaults when unset", func(t *testing.T) {
-		t.Setenv("RATE_LIMIT_RPS", "")
-		t.Setenv("RATE_LIMIT_BURST", "")
-		if got := RateLimitRPS(); got != defaultRateLimitRPS {
-			t.Errorf("RateLimitRPS() = %v, want %v", got, defaultRateLimitRPS)
+		t.Setenv("REQUEST_RATE_LIMIT_RPS", "")
+		t.Setenv("REQUEST_RATE_LIMIT_BURST", "")
+		if got := RequestRateLimitRPS(); got != defaultRequestRateLimitRPS {
+			t.Errorf("RequestRateLimitRPS() = %v, want %v", got, defaultRequestRateLimitRPS)
 		}
-		if got := RateLimitBurst(); got != defaultRateLimitBurst {
-			t.Errorf("RateLimitBurst() = %v, want %v", got, defaultRateLimitBurst)
+		if got := RequestRateLimitBurst(); got != defaultRequestRateLimitBurst {
+			t.Errorf("RequestRateLimitBurst() = %v, want %v", got, defaultRequestRateLimitBurst)
 		}
 	})
 	t.Run("env override", func(t *testing.T) {
-		t.Setenv("RATE_LIMIT_RPS", "5.5")
-		t.Setenv("RATE_LIMIT_BURST", "12")
-		if got := RateLimitRPS(); got != 5.5 {
-			t.Errorf("RateLimitRPS() = %v, want 5.5", got)
+		t.Setenv("REQUEST_RATE_LIMIT_RPS", "5.5")
+		t.Setenv("REQUEST_RATE_LIMIT_BURST", "12")
+		if got := RequestRateLimitRPS(); got != 5.5 {
+			t.Errorf("RequestRateLimitRPS() = %v, want 5.5", got)
 		}
-		if got := RateLimitBurst(); got != 12 {
-			t.Errorf("RateLimitBurst() = %v, want 12", got)
+		if got := RequestRateLimitBurst(); got != 12 {
+			t.Errorf("RequestRateLimitBurst() = %v, want 12", got)
 		}
 	})
 	t.Run("invalid and non-positive values fall back to defaults", func(t *testing.T) {
-		t.Setenv("RATE_LIMIT_RPS", "abc")
-		t.Setenv("RATE_LIMIT_BURST", "-3")
-		if got := RateLimitRPS(); got != defaultRateLimitRPS {
-			t.Errorf("RateLimitRPS() = %v, want default", got)
+		t.Setenv("REQUEST_RATE_LIMIT_RPS", "abc")
+		t.Setenv("REQUEST_RATE_LIMIT_BURST", "-3")
+		if got := RequestRateLimitRPS(); got != defaultRequestRateLimitRPS {
+			t.Errorf("RequestRateLimitRPS() = %v, want default", got)
 		}
-		if got := RateLimitBurst(); got != defaultRateLimitBurst {
-			t.Errorf("RateLimitBurst() = %v, want default", got)
+		if got := RequestRateLimitBurst(); got != defaultRequestRateLimitBurst {
+			t.Errorf("RequestRateLimitBurst() = %v, want default", got)
+		}
+	})
+}
+
+func TestScoringRateLimit(t *testing.T) {
+	t.Run("defaults when unset", func(t *testing.T) {
+		t.Setenv("SCORING_RATE_LIMIT_RPS", "")
+		t.Setenv("SCORING_RATE_LIMIT_BURST", "")
+		t.Setenv("RATE_LIMIT_RPS", "")
+		t.Setenv("RATE_LIMIT_BURST", "")
+		if got := ScoringRateLimitRPS(); got != defaultScoringRateLimitRPS {
+			t.Errorf("ScoringRateLimitRPS() = %v, want %v", got, defaultScoringRateLimitRPS)
+		}
+		if got := ScoringRateLimitBurst(); got != defaultScoringRateLimitBurst {
+			t.Errorf("ScoringRateLimitBurst() = %v, want %v", got, defaultScoringRateLimitBurst)
+		}
+	})
+	t.Run("scoring env override wins", func(t *testing.T) {
+		t.Setenv("SCORING_RATE_LIMIT_RPS", "6.5")
+		t.Setenv("SCORING_RATE_LIMIT_BURST", "13")
+		t.Setenv("RATE_LIMIT_RPS", "2")
+		t.Setenv("RATE_LIMIT_BURST", "3")
+		if got := ScoringRateLimitRPS(); got != 6.5 {
+			t.Errorf("ScoringRateLimitRPS() = %v, want 6.5", got)
+		}
+		if got := ScoringRateLimitBurst(); got != 13 {
+			t.Errorf("ScoringRateLimitBurst() = %v, want 13", got)
+		}
+	})
+	t.Run("legacy env remains a fallback", func(t *testing.T) {
+		t.Setenv("SCORING_RATE_LIMIT_RPS", "")
+		t.Setenv("SCORING_RATE_LIMIT_BURST", "")
+		t.Setenv("RATE_LIMIT_RPS", "4.5")
+		t.Setenv("RATE_LIMIT_BURST", "11")
+		if got := ScoringRateLimitRPS(); got != 4.5 {
+			t.Errorf("ScoringRateLimitRPS() = %v, want 4.5", got)
+		}
+		if got := ScoringRateLimitBurst(); got != 11 {
+			t.Errorf("ScoringRateLimitBurst() = %v, want 11", got)
 		}
 	})
 }

@@ -97,9 +97,12 @@ repository root (or set `CREDIT_RISK_DATA_DIR` / `CREDIT_RISK_MODELS_DIR`).
 with the first key in `API_KEYS`.
 The scoring API requires `API_KEYS` (comma-separated); it refuses to
 start unauthenticated unless `ALLOW_UNAUTHENTICATED_DEV=true` is set for
-local development. `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` tune the
-per-client token bucket (default 20/40); `/score/batch` charges one
-token **per applicant**, so a batch cannot multiply a client's allowance.
+local development. `REQUEST_RATE_LIMIT_RPS` /
+`REQUEST_RATE_LIMIT_BURST` tune the per-request bucket (default 50/100).
+`SCORING_RATE_LIMIT_RPS` / `SCORING_RATE_LIMIT_BURST` tune the decision
+bucket (default 20/40); `/score/batch` charges one scoring token per
+applicant and no extra scoring token for the enclosing request. Legacy
+`RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` remain scoring-limit fallbacks.
 `/health` reports 503 (degraded) when the feature store is unreachable,
 so load balancers stop routing to an instance that cannot score.
 

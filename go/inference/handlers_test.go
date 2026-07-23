@@ -1,13 +1,19 @@
 package inference
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/db"
 	"github.com/BoraKaraman1/credit-risk-agent-GBM/go/shared/model"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // Handler and helper tests that need no database and no champion
@@ -35,6 +41,27 @@ func syntheticAPIModel() *model.Model {
 		Trees:              []model.Tree{tree(0, -1, 1), tree(1, -1, 1)},
 	}
 }
+
+type fakeScoringStore struct {
+	features *db.ApplicantFeatures
+	fetchErr error
+	auditErr error
+	audits   []db.ScoringAudit
+}
+
+func (f *fakeScoringStore) FetchApplicantFeatures(
+	context.Context, string,
+) (*db.ApplicantFeatures, error) {
+	return f.features, f.fetchErr
+}
+
+func (f *fakeScoringStore) InsertScoringLog(_ context.Context, audit db.ScoringAudit) error {
+	f.audits = append(f.audits, audit)
+	return f.auditErr
+}
+
+func (f *fakeScoringStore) Ping(context.Context) error { return nil }
+func (f *fakeScoringStore) Close()                     {}
 
 func TestRound(t *testing.T) {
 	cases := []struct {
@@ -161,7 +188,9 @@ func TestAdverseActionCap(t *testing.T) {
 	// Five single-split trees on five features, all pushed risky:
 	// five positive contributions must be capped at numAdverseActions.
 	var trees []model.Tree
-	features := []string{"a", "b", "c", "d", "e"}
+	features := []string{
+		"annual_inc", "dti", "installment_to_income", "loan_to_income", "delinq_2yrs",
+	}
 	for i := range features {
 		trees = append(trees, model.Tree{
 			Value:           []float64{0, -1, 1},
@@ -187,6 +216,127 @@ func TestAdverseActionCap(t *testing.T) {
 	actions := computeAdverseActions(m, x, feats)
 	if len(actions) != numAdverseActions {
 		t.Errorf("got %d actions, want cap of %d", len(actions), numAdverseActions)
+	}
+}
+
+func TestAdverseActionsDeduplicateReasonCodes(t *testing.T) {
+	tree := func(feature int32, weight float64) model.Tree {
+		return model.Tree{
+			Value:           []float64{0, -weight, weight},
+			Count:           []float64{100, 50, 50},
+			FeatureIdx:      []int32{feature, 0, 0},
+			NumThreshold:    []float64{0.5, 0, 0},
+			MissingGoToLeft: []uint8{1, 0, 0},
+			Left:            []uint32{1, 0, 0},
+			Right:           []uint32{2, 0, 0},
+			IsLeaf:          []uint8{0, 1, 1},
+		}
+	}
+	features := []string{"dti", "dti_x_income", "loan_amnt", "term", "fico_score"}
+	m := &model.Model{
+		FormatVersion: 1,
+		Version:       "vtest",
+		NFeatures:     len(features),
+		Features:      features,
+		Trees: []model.Tree{
+			tree(0, 1),
+			tree(1, 3),
+			tree(2, 1),
+			tree(3, 2),
+			tree(4, 1),
+		},
+	}
+	x := []float64{1, 1, 1, 1, 1}
+	snapshot := map[string]*float64{}
+	for _, feature := range features {
+		value := 1.0
+		snapshot[feature] = &value
+	}
+
+	actions := computeAdverseActions(m, x, snapshot)
+	if len(actions) != 3 {
+		t.Fatalf("actions = %+v, want three unique reason codes", actions)
+	}
+	seen := map[int]bool{}
+	for _, action := range actions {
+		if seen[action.Code] {
+			t.Fatalf("duplicate reason code %d in %+v", action.Code, actions)
+		}
+		seen[action.Code] = true
+	}
+	if actions[0].Code != featureAdverseReason["dti_x_income"].Code ||
+		actions[0].FeatureName != featureDisplayNames["dti_x_income"] {
+		t.Errorf("highest SHAP representative was not retained: %+v", actions[0])
+	}
+}
+
+func TestScoreApplicantAuditsCompleteEnvelopeBeforeMetrics(t *testing.T) {
+	now := time.Now()
+	dti, fico := 1.0, 1.0
+	completeness := 0.97
+	ficoScore, grade := 640, 7
+	features := map[string]*float64{"dti": &dti, "fico_score": &fico}
+	m := syntheticAPIModel()
+	m.FeatureVersion = 7
+	m.Calibration = &model.Calibration{
+		Method: "isotonic",
+		X:      []float64{0, 1},
+		Y:      []float64{0.1, 0.4},
+	}
+	m.Scorecard = &model.Scorecard{Factor: 20, Offset: 600}
+	store := &fakeScoringStore{features: &db.ApplicantFeatures{
+		Features:         features,
+		DataCompleteness: &completeness,
+		FicoScore:        &ficoScore,
+		Grade:            &grade,
+		FeatureVersion:   7,
+		ComputedAt:       &now,
+	}}
+	s := &server{model: m, db: store}
+	ctx := context.WithValue(context.Background(), requestIDKey, "req-123")
+	beforeScores := histSampleCount(t, scoreDistribution)
+	beforeDecisions := testutil.ToFloat64(decisionsTotal.WithLabelValues("decline"))
+
+	resp, err := s.scoreApplicant(ctx, "LC_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.audits) != 1 {
+		t.Fatalf("audit count = %d, want 1", len(store.audits))
+	}
+	audit := store.audits[0]
+	if audit.RequestID != "req-123" ||
+		audit.ApplicantID != resp.ApplicantID ||
+		audit.ModelVersion != resp.ModelVersion ||
+		audit.FeatureVersion != resp.FeatureVersion ||
+		audit.RawScore != resp.Score ||
+		audit.Decision != resp.Decision {
+		t.Errorf("audit envelope does not match response: audit=%+v response=%+v", audit, resp)
+	}
+	if !reflect.DeepEqual(audit.FeatureSnapshot, features) ||
+		!reflect.DeepEqual(audit.CalibratedPD, resp.PD) ||
+		!reflect.DeepEqual(audit.ScaledScore, resp.ScaledScore) ||
+		!reflect.DeepEqual(audit.AdverseActions, resp.AdverseActions) {
+		t.Errorf("audit payload incomplete: audit=%+v response=%+v", audit, resp)
+	}
+	if got := histSampleCount(t, scoreDistribution) - beforeScores; got != 1 {
+		t.Errorf("score metric delta = %d, want 1", got)
+	}
+	if got := testutil.ToFloat64(decisionsTotal.WithLabelValues("decline")) - beforeDecisions; got != 1 {
+		t.Errorf("decision metric delta = %v, want 1", got)
+	}
+
+	store.auditErr = errors.New("audit unavailable")
+	beforeScores = histSampleCount(t, scoreDistribution)
+	beforeDecisions = testutil.ToFloat64(decisionsTotal.WithLabelValues("decline"))
+	if _, err := s.scoreApplicant(ctx, "LC_2"); err == nil {
+		t.Fatal("audit failure should withhold the decision")
+	}
+	if got := histSampleCount(t, scoreDistribution) - beforeScores; got != 0 {
+		t.Errorf("failed audit recorded %d score metrics, want 0", got)
+	}
+	if got := testutil.ToFloat64(decisionsTotal.WithLabelValues("decline")) - beforeDecisions; got != 0 {
+		t.Errorf("failed audit recorded %v decisions, want 0", got)
 	}
 }
 
@@ -282,7 +432,7 @@ func TestHandleScoreValidation(t *testing.T) {
 }
 
 func TestHandleScoreBatchValidation(t *testing.T) {
-	s := &server{model: syntheticAPIModel(), limiter: newRateLimiter(100, 100)}
+	s := &server{model: syntheticAPIModel(), scoringLimiter: newRateLimiter(100, 100)}
 	t.Run("invalid json", func(t *testing.T) {
 		rec := postJSON(t, s.handleScoreBatch, `{nope`)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -354,7 +504,7 @@ func TestHandleScoreTrailingData(t *testing.T) {
 }
 
 func TestHandleScoreBatchLimits(t *testing.T) {
-	s := &server{model: syntheticAPIModel(), limiter: newRateLimiter(100, 100)}
+	s := &server{model: syntheticAPIModel(), scoringLimiter: newRateLimiter(100, 100)}
 	t.Run("empty list is 422", func(t *testing.T) {
 		rec := postJSON(t, s.handleScoreBatch, `{"applicant_ids":[]}`)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -380,7 +530,7 @@ func TestHandleScoreBatchLimits(t *testing.T) {
 func TestHandleScoreBatchChargesPerApplicant(t *testing.T) {
 	t.Setenv("DATABASE_URL", "") // scoring itself fails fast; tokens still burn
 	// burst=2, no refill: the first two applicants consume the bucket.
-	s := &server{model: syntheticAPIModel(), limiter: newRateLimiter(0.0001, 2)}
+	s := &server{model: syntheticAPIModel(), scoringLimiter: newRateLimiter(0.0001, 2)}
 	rec := postJSON(t, s.handleScoreBatch, `{"applicant_ids": ["LC_1", "LC_2", "LC_3", "LC_4"]}`)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429 once the bucket empties", rec.Code)
@@ -401,6 +551,41 @@ func TestHandleScoreBatchChargesPerApplicant(t *testing.T) {
 	}
 	if resp.Errors[2].ApplicantID != "LC_3" || resp.Errors[3].ApplicantID != "LC_4" {
 		t.Errorf("rate-limited IDs = %+v, want LC_3/LC_4 in order", resp.Errors[2:])
+	}
+}
+
+func TestComposedBatchRouteDoesNotDoubleChargeScoringLimit(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	s := &server{
+		model:          syntheticAPIModel(),
+		requestLimiter: newRateLimiter(0.0001, 1),
+		scoringLimiter: newRateLimiter(0.0001, 2),
+	}
+	handler := instrument(
+		"/test-batch-rate",
+		s.protect(http.HandlerFunc(s.handleScoreBatch)),
+	)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/score/batch",
+		strings.NewReader(`{"applicant_ids":["LC_1","LC_2"]}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first batch status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(
+		http.MethodPost,
+		"/score/batch",
+		strings.NewReader(`{"applicant_ids":["LC_3"]}`),
+	)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want request-level 429", rec.Code)
 	}
 }
 

@@ -158,8 +158,9 @@ Every business request passes through this chain:
 client
   -> instrument            (request ID, access log, HTTP metrics)
      -> auth               (X-API-Key, constant-time compare)
-        -> rate limit      (per-client token bucket)
+        -> request limit   (per-client HTTP token bucket)
            -> handler      (score / batch / reload)
+              -> scoring limit (one token per applicant)
 ```
 
 `instrument` is outermost so even a 401 or 429 gets a request ID, an
@@ -187,20 +188,24 @@ reach it.
 
 ### Rate limiting
 
-A per-client token bucket (`golang.org/x/time/rate`), one limiter per
-client identity held in a map behind a mutex. The client identity is the
-API key when the request is authenticated, otherwise the client IP
-(taking the first `X-Forwarded-For` hop when present, since the API runs
-behind compose or a reverse proxy).
+Two per-client token buckets (`golang.org/x/time/rate`) keep HTTP
+overhead and scoring work separate. The request bucket charges every
+authenticated business request once. The scoring bucket charges
+`/score` once and `/score/batch` once per valid applicant, so a
+two-applicant batch costs one request token and two scoring tokens,
+never three scoring tokens.
 
-Defaults are 20 requests/second sustained with a burst of 40, set by
-`RATE_LIMIT_RPS` and `RATE_LIMIT_BURST`. An over-budget request gets a
-`429` with a `Retry-After` header.
+Request limits default to 50 requests/second with a burst of 100, set by
+`REQUEST_RATE_LIMIT_RPS` and `REQUEST_RATE_LIMIT_BURST`. Scoring limits
+default to 20 decisions/second with a burst of 40, set by
+`SCORING_RATE_LIMIT_RPS` and `SCORING_RATE_LIMIT_BURST`. The older
+`RATE_LIMIT_RPS` and `RATE_LIMIT_BURST` variables remain fallbacks for
+the scoring bucket. An over-budget request gets a `429` with a
+`Retry-After` header.
 
-One known limit: the limiter map is not evicted, so a flood of distinct
-client IPs grows it without bound. For this deployment the key space is a
-handful of integrators, so no janitor was added. A comment marks the
-spot for when that assumption stops holding.
+Both buckets use the API-key digest when authenticated and the client IP
+otherwise. Idle client entries are evicted periodically so the limiter
+maps stay bounded.
 
 ### Observability
 
@@ -217,7 +222,8 @@ for free):
 | `scoring_api_model_info` | gauge | version | loaded model version (value always 1) |
 
 HTTP metrics are recorded by `instrument`. Score and decision metrics are
-recorded by the scoring handler. `scoring_api_model_info` uses the info
+recorded only after the complete audit row commits successfully.
+`scoring_api_model_info` uses the info
 pattern: a gauge set to 1 with the version as a label, reset on reload so
 only the current version is present.
 
@@ -269,8 +275,12 @@ process exits non-zero instead of silently continuing.
 | `API_KEYS` | unset (required) | comma-separated accepted API keys; the server fails closed if unset |
 | `ALLOW_UNAUTHENTICATED_DEV` | unset (false) | allow startup with no `API_KEYS` (local development only) |
 | `ALLOW_UNAPPROVED_MODEL` | unset (false) | audited override to serve a non-APPROVED model card (SR 11-7) |
-| `RATE_LIMIT_RPS` | 20 | per-client sustained request rate |
-| `RATE_LIMIT_BURST` | 40 | per-client token-bucket depth |
+| `REQUEST_RATE_LIMIT_RPS` | 50 | per-client sustained HTTP request rate |
+| `REQUEST_RATE_LIMIT_BURST` | 100 | per-client HTTP request bucket depth |
+| `SCORING_RATE_LIMIT_RPS` | 20 | per-client sustained scoring rate |
+| `SCORING_RATE_LIMIT_BURST` | 40 | per-client scoring bucket depth |
+| `RATE_LIMIT_RPS` | unset | legacy fallback for `SCORING_RATE_LIMIT_RPS` |
+| `RATE_LIMIT_BURST` | unset | legacy fallback for `SCORING_RATE_LIMIT_BURST` |
 | `PORT` | 8000 | listen port |
 | `DATABASE_URL` | unset | Postgres / Supabase connection (existing) |
 | `CREDIT_RISK_MODELS_DIR` | `data/models` | model location (existing) |
@@ -282,7 +292,7 @@ process exits non-zero instead of silently continuing.
 | `go/inference/middleware.go` | New. Instrument, auth, rate limiter, client identity. |
 | `go/inference/metrics.go` | New. Prometheus metric definitions and helpers. |
 | `go/inference/server.go` | Middleware wiring, `/metrics`, server timeouts, graceful shutdown. |
-| `go/shared/config/config.go` | `APIKeys()`, `RateLimitRPS()`, `RateLimitBurst()`. |
+| `go/shared/config/config.go` | API keys plus separate request and scoring limiter configuration. |
 | `go/inference/middleware_test.go`, `metrics_test.go`, `config_test.go` | Unit tests. |
 | `docker-compose.yml` | Prometheus + Grafana under a `monitoring` profile. |
 | `monitoring/` | New. `prometheus.yml`, Grafana provisioning, dashboard JSON. |

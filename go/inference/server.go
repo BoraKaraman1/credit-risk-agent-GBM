@@ -133,14 +133,7 @@ var featureAdverseReason = map[string]adverseReason{
 	"sub_grade_numeric":      {20, "Assigned credit risk grade"},
 }
 
-type adverseAction struct {
-	Code         int     `json:"code"`
-	Reason       string  `json:"reason"`
-	FeatureName  string  `json:"feature_name"`
-	ShapValue    float64 `json:"shap_value"`
-	FeatureValue float64 `json:"feature_value"`
-	Direction    string  `json:"direction"`
-}
+type adverseAction = db.AdverseAction
 
 type scoreResponse struct {
 	ApplicantID      string          `json:"applicant_id"`
@@ -149,6 +142,7 @@ type scoreResponse struct {
 	ScaledScore      *int            `json:"scaled_score"`
 	Decision         string          `json:"decision"`
 	ModelVersion     string          `json:"model_version"`
+	FeatureVersion   int             `json:"feature_version"`
 	FicoScore        *int            `json:"fico_score"`
 	Grade            *int            `json:"grade"`
 	DataCompleteness *float64        `json:"data_completeness"`
@@ -188,11 +182,21 @@ type server struct {
 	modelLoadedAt string
 
 	dbMu sync.Mutex
-	db   *db.DB
+	db   scoringStore
 
-	apiKeys    [][]byte
-	limiter    *rateLimiter
-	trustProxy bool
+	apiKeys        [][]byte
+	requestLimiter *rateLimiter
+	scoringLimiter *rateLimiter
+	trustProxy     bool
+}
+
+// scoringStore is the serving boundary over Postgres. Keeping it narrow
+// makes the fail-closed audit behavior testable without a live database.
+type scoringStore interface {
+	FetchApplicantFeatures(context.Context, string) (*db.ApplicantFeatures, error)
+	InsertScoringLog(context.Context, db.ScoringAudit) error
+	Ping(context.Context) error
+	Close()
 }
 
 func (s *server) loadModel() error {
@@ -242,7 +246,7 @@ func (s *server) currentModel() (*model.Model, string) {
 }
 
 // getDB lazily connects, like the Python service's get_engine.
-func (s *server) getDB(ctx context.Context) (*db.DB, error) {
+func (s *server) getDB(ctx context.Context) (scoringStore, error) {
 	s.dbMu.Lock()
 	defer s.dbMu.Unlock()
 	if s.db != nil {
@@ -284,6 +288,7 @@ func computeAdverseActions(m *model.Model, x []float64, features map[string]*flo
 	sort.Slice(order, func(a, b int) bool { return shapValues[order[a]] > shapValues[order[b]] })
 
 	actions := []adverseAction{}
+	seenCodes := make(map[int]struct{}, numAdverseActions)
 	for _, idx := range order {
 		if shapValues[idx] <= 0 || len(actions) >= numAdverseActions {
 			break
@@ -297,6 +302,10 @@ func computeAdverseActions(m *model.Model, x []float64, features map[string]*flo
 		if !ok {
 			reason = adverseReason{Code: 0, Reason: display}
 		}
+		if _, duplicate := seenCodes[reason.Code]; duplicate {
+			continue
+		}
+		seenCodes[reason.Code] = struct{}{}
 		featValue := 0.0
 		if v := features[featName]; v != nil {
 			featValue = *v
@@ -396,7 +405,6 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 	}
 
 	decision := decide(decisionBasis)
-	recordScore(score, decision)
 
 	// ECOA adverse action reasons (only for decline/review)
 	actions := []adverseAction{}
@@ -409,24 +417,42 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 	// the caller gets a retryable 503, never an unaudited decision.
 	logCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := d.InsertScoringLog(logCtx, applicantID, m.Version, feat.Features, score, decision); err != nil {
-		logger(ctx).Error("audit write failed; decision withheld", "error", err)
-		return nil, &httpError{http.StatusServiceUnavailable,
-			"decision could not be audit-logged; retry"}
-	}
-
-	return &scoreResponse{
+	resp := &scoreResponse{
 		ApplicantID:      applicantID,
 		Score:            round(score, 5),
 		PD:               calibratedPD,
 		ScaledScore:      scaledScore,
 		Decision:         decision,
 		ModelVersion:     m.Version,
+		FeatureVersion:   feat.FeatureVersion,
 		FicoScore:        feat.FicoScore,
 		Grade:            feat.Grade,
 		DataCompleteness: feat.DataCompleteness,
 		AdverseActions:   actions,
-	}, nil
+	}
+	audit := db.ScoringAudit{
+		RequestID:       requestID(ctx),
+		ApplicantID:     resp.ApplicantID,
+		ModelVersion:    resp.ModelVersion,
+		FeatureVersion:  resp.FeatureVersion,
+		FeatureSnapshot: feat.Features,
+		RawScore:        resp.Score,
+		CalibratedPD:    resp.PD,
+		ScaledScore:     resp.ScaledScore,
+		Decision:        resp.Decision,
+		AdverseActions:  resp.AdverseActions,
+	}
+	if err := d.InsertScoringLog(logCtx, audit); err != nil {
+		logger(ctx).Error("audit write failed; decision withheld", "error", err)
+		return nil, &httpError{http.StatusServiceUnavailable,
+			"decision could not be audit-logged; retry"}
+	}
+
+	// Only audited decisions are observable as successful business
+	// events. Failed audit writes must not inflate score or decision
+	// metrics for decisions that were withheld.
+	recordScore(resp.Score, resp.Decision)
+	return resp, nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -495,6 +521,10 @@ func (s *server) handleScore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"detail": err.Error()})
 		return
 	}
+	if !s.allowScoring(w, r, 1) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"detail": "rate limit exceeded"})
+		return
+	}
 	resp, err := s.scoreApplicant(r.Context(), req.ApplicantID)
 	if err != nil {
 		writeError(w, r, err)
@@ -526,14 +556,12 @@ func (s *server) handleScoreBatch(w http.ResponseWriter, r *http.Request) {
 	// client's allowance by up to maxBatchSize. When the bucket empties
 	// mid-batch the remainder fails fast instead of queueing behind a
 	// slow database.
-	limiter := s.limiter.get(clientID(r, s.trustProxy), time.Now())
 	for i, aid := range req.ApplicantIDs {
 		if err := validateApplicantID(aid); err != nil {
 			out.Errors = append(out.Errors, batchError{ApplicantID: aid, Error: err.Error()})
 			continue
 		}
-		if !limiter.Allow() {
-			w.Header().Set("Retry-After", "1")
+		if !s.allowScoring(w, r, 1) {
 			for _, rest := range req.ApplicantIDs[i:] {
 				out.Errors = append(out.Errors, batchError{ApplicantID: rest, Error: "rate limit exceeded"})
 			}
@@ -548,6 +576,24 @@ func (s *server) handleScoreBatch(w http.ResponseWriter, r *http.Request) {
 		out.Results = append(out.Results, *resp)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// allowScoring charges the business-operation limiter independently of
+// the request limiter. A single score costs one token and a batch costs
+// one token per attempted valid applicant, never N plus one.
+func (s *server) allowScoring(w http.ResponseWriter, r *http.Request, n int) bool {
+	if s.scoringLimiter == nil {
+		return true
+	}
+	client := clientID(r, s.trustProxy)
+	now := time.Now()
+	limiter := s.scoringLimiter.get(client, now)
+	if limiter.AllowN(now, n) {
+		return true
+	}
+	logger(r.Context()).Warn("scoring rate limit exceeded", "client", client, "tokens", n)
+	w.Header().Set("Retry-After", "1")
+	return false
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -605,8 +651,13 @@ func Serve() {
 	config.LoadEnv()
 
 	s := &server{
-		apiKeys:    parseAPIKeys(config.APIKeys()),
-		limiter:    newRateLimiter(config.RateLimitRPS(), config.RateLimitBurst()),
+		apiKeys: parseAPIKeys(config.APIKeys()),
+		requestLimiter: newRateLimiter(
+			config.RequestRateLimitRPS(), config.RequestRateLimitBurst(),
+		),
+		scoringLimiter: newRateLimiter(
+			config.ScoringRateLimitRPS(), config.ScoringRateLimitBurst(),
+		),
 		trustProxy: config.TrustProxyHeaders(),
 	}
 	if err := s.loadModel(); err != nil {

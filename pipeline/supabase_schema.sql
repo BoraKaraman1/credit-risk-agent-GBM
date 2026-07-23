@@ -28,13 +28,25 @@ CREATE TABLE IF NOT EXISTS scoring_log (
     id                  BIGSERIAL PRIMARY KEY,
     applicant_id        TEXT NOT NULL,
     scored_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    request_id          TEXT,
     model_version       TEXT NOT NULL,
+    feature_version     INT NOT NULL DEFAULT 0,
     feature_snapshot    JSONB NOT NULL,
     score               NUMERIC(6,5),
+    calibrated_pd       NUMERIC(6,5),
+    scaled_score        INT,
     decision            TEXT,
+    adverse_actions     JSONB NOT NULL DEFAULT '[]'::jsonb,
     actual_default      BOOLEAN,
     outcome_observed_at TIMESTAMPTZ
 );
+
+-- Idempotent forward migration for databases created by older versions.
+ALTER TABLE scoring_log ADD COLUMN IF NOT EXISTS request_id TEXT;
+ALTER TABLE scoring_log ADD COLUMN IF NOT EXISTS feature_version INT NOT NULL DEFAULT 0;
+ALTER TABLE scoring_log ADD COLUMN IF NOT EXISTS calibrated_pd NUMERIC(6,5);
+ALTER TABLE scoring_log ADD COLUMN IF NOT EXISTS scaled_score INT;
+ALTER TABLE scoring_log ADD COLUMN IF NOT EXISTS adverse_actions JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS ix_scoring_log_scored_at
     ON scoring_log (scored_at DESC);

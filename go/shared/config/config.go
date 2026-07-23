@@ -86,11 +86,14 @@ var (
 	ReviewThreshold  = contract.Decision.ReviewBelow
 )
 
-// Per-client rate limit defaults (token bucket). RATE_LIMIT_RPS is the
-// sustained rate, RATE_LIMIT_BURST the bucket depth.
+// Per-client request and scoring rate-limit defaults. The first bounds
+// authenticated HTTP request overhead; the second charges decisions,
+// including one token for every applicant in a batch.
 const (
-	defaultRateLimitRPS   = 20.0
-	defaultRateLimitBurst = 40
+	defaultRequestRateLimitRPS   = 50.0
+	defaultRequestRateLimitBurst = 100
+	defaultScoringRateLimitRPS   = 20.0
+	defaultScoringRateLimitBurst = 40
 )
 
 // LoadEnv loads .env if present (like python-dotenv, existing
@@ -170,24 +173,44 @@ func APIKeys() []string {
 	return keys
 }
 
-// RateLimitRPS is the per-client sustained request rate.
-func RateLimitRPS() float64 {
-	if v := os.Getenv("RATE_LIMIT_RPS"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
-			return f
-		}
+func positiveFloatEnv(key string, fallback float64) float64 {
+	if f, err := strconv.ParseFloat(os.Getenv(key), 64); err == nil && f > 0 {
+		return f
 	}
-	return defaultRateLimitRPS
+	return fallback
 }
 
-// RateLimitBurst is the per-client token-bucket depth.
-func RateLimitBurst() int {
-	if v := os.Getenv("RATE_LIMIT_BURST"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
+func positiveIntEnv(key string, fallback int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
+		return n
 	}
-	return defaultRateLimitBurst
+	return fallback
+}
+
+func RequestRateLimitRPS() float64 {
+	return positiveFloatEnv("REQUEST_RATE_LIMIT_RPS", defaultRequestRateLimitRPS)
+}
+
+func RequestRateLimitBurst() int {
+	return positiveIntEnv("REQUEST_RATE_LIMIT_BURST", defaultRequestRateLimitBurst)
+}
+
+// ScoringRateLimitRPS is the per-client decision rate. RATE_LIMIT_RPS
+// remains a compatibility fallback for existing deployments.
+func ScoringRateLimitRPS() float64 {
+	if os.Getenv("SCORING_RATE_LIMIT_RPS") != "" {
+		return positiveFloatEnv("SCORING_RATE_LIMIT_RPS", defaultScoringRateLimitRPS)
+	}
+	return positiveFloatEnv("RATE_LIMIT_RPS", defaultScoringRateLimitRPS)
+}
+
+// ScoringRateLimitBurst is the decision bucket depth. RATE_LIMIT_BURST
+// remains a compatibility fallback for existing deployments.
+func ScoringRateLimitBurst() int {
+	if os.Getenv("SCORING_RATE_LIMIT_BURST") != "" {
+		return positiveIntEnv("SCORING_RATE_LIMIT_BURST", defaultScoringRateLimitBurst)
+	}
+	return positiveIntEnv("RATE_LIMIT_BURST", defaultScoringRateLimitBurst)
 }
 
 // OutcomeBackfillDelayDays is how long after scoring an outcome is

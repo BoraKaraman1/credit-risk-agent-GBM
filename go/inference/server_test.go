@@ -38,6 +38,7 @@ func TestComputeAdverseActions(t *testing.T) {
 		t.Fatalf("got %d adverse actions, want 1..%d", len(actions), numAdverseActions)
 	}
 	prev := math.Inf(1)
+	seenCodes := map[int]bool{}
 	for _, a := range actions {
 		if a.ShapValue <= 0 {
 			t.Errorf("%s: non-positive shap value %v", a.FeatureName, a.ShapValue)
@@ -48,6 +49,10 @@ func TestComputeAdverseActions(t *testing.T) {
 		if a.Direction != "increases risk" {
 			t.Errorf("unexpected direction %q", a.Direction)
 		}
+		if seenCodes[a.Code] {
+			t.Errorf("duplicate adverse reason code %d in %+v", a.Code, actions)
+		}
+		seenCodes[a.Code] = true
 		prev = a.ShapValue
 	}
 

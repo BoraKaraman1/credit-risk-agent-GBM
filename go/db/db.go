@@ -78,18 +78,53 @@ func (d *DB) HasDriftLogEntry(ctx context.Context, metricName, modelVersion stri
 	return exists, err
 }
 
-// InsertScoringLog writes one scoring audit record.
-func (d *DB) InsertScoringLog(ctx context.Context, applicantID, modelVersion string,
-	features map[string]*float64, score float64, decision string) error {
-	featuresJSON, err := json.Marshal(features)
+// AdverseAction is one principal reason disclosed with a non-approval.
+// It lives in db so the complete decision envelope has one typed audit
+// contract instead of being assembled as loosely related SQL arguments.
+type AdverseAction struct {
+	Code         int     `json:"code"`
+	Reason       string  `json:"reason"`
+	FeatureName  string  `json:"feature_name"`
+	ShapValue    float64 `json:"shap_value"`
+	FeatureValue float64 `json:"feature_value"`
+	Direction    string  `json:"direction"`
+}
+
+// ScoringAudit is the exact decision envelope persisted before a score
+// may be returned to the caller.
+type ScoringAudit struct {
+	RequestID       string
+	ApplicantID     string
+	ModelVersion    string
+	FeatureVersion  int
+	FeatureSnapshot map[string]*float64
+	RawScore        float64
+	CalibratedPD    *float64
+	ScaledScore     *int
+	Decision        string
+	AdverseActions  []AdverseAction
+}
+
+// InsertScoringLog writes one complete scoring audit record.
+func (d *DB) InsertScoringLog(ctx context.Context, audit ScoringAudit) error {
+	featuresJSON, err := json.Marshal(audit.FeatureSnapshot)
+	if err != nil {
+		return err
+	}
+	actionsJSON, err := json.Marshal(audit.AdverseActions)
 	if err != nil {
 		return err
 	}
 	_, err = d.Pool.Exec(ctx, `
 		INSERT INTO scoring_log
-			(applicant_id, model_version, feature_snapshot, score, decision)
-		VALUES ($1, $2, $3::jsonb, $4, $5)`,
-		applicantID, modelVersion, string(featuresJSON), score, decision)
+			(request_id, applicant_id, model_version, feature_version,
+			 feature_snapshot, score, calibrated_pd, scaled_score,
+			 decision, adverse_actions)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10::jsonb)`,
+		audit.RequestID, audit.ApplicantID, audit.ModelVersion,
+		audit.FeatureVersion, string(featuresJSON), audit.RawScore,
+		audit.CalibratedPD, audit.ScaledScore, audit.Decision,
+		string(actionsJSON))
 	return err
 }
 
