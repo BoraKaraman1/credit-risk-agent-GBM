@@ -46,7 +46,7 @@ flowchart TB
 
     subgraph SVC["gbm binary - Go serving and monitoring"]
         serve["gbm serve<br/>scoring API"]
-        sync["gbm sync"]
+        sync["gbm sync --model challenger"]
         drift["gbm drift"]
         perf["gbm performance"]
         back["gbm backfill"]

@@ -131,9 +131,21 @@ func TestPromoteChallenger(t *testing.T) {
 		t.Errorf("legacy champion v1.2 should be archived: %v", err)
 	}
 
-	// Versions are immutable: re-publishing the same version fails.
+	// An exact retry reuses the immutable version and succeeds.
+	if retryVersion, err := promoteChallenger(modelsDir); err != nil || retryVersion != "v1.3" {
+		t.Errorf("identical retry = (%q, %v), want v1.3 success", retryVersion, err)
+	}
+
+	// Reusing the version for different bytes still fails.
+	if err := os.WriteFile(
+		filepath.Join(modelsDir, "challenger", "model.joblib"),
+		[]byte("different"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := promoteChallenger(modelsDir); err == nil {
-		t.Error("re-promoting an existing version should fail (immutable)")
+		t.Error("conflicting artifacts under an immutable version should fail")
 	}
 }
 
@@ -142,11 +154,11 @@ func TestNotifyReload(t *testing.T) {
 	var gotMethod, gotPath, gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath, gotKey = r.Method, r.URL.Path, r.Header.Get("X-API-Key")
-		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"model_version": "v1.3"})
 	}))
 	defer srv.Close()
 
-	if err := notifyReload(srv.URL); err != nil {
+	if err := notifyReload(srv.URL, "v1.3"); err != nil {
 		t.Fatalf("notifyReload: %v", err)
 	}
 	if gotMethod != http.MethodPost || gotPath != "/reload" {
@@ -161,18 +173,125 @@ func TestNotifyReload(t *testing.T) {
 			http.Error(w, "no challenger", http.StatusServiceUnavailable)
 		}))
 		defer bad.Close()
-		if err := notifyReload(bad.URL); err == nil {
+		if err := notifyReload(bad.URL, "v1.3"); err == nil {
 			t.Error("want error on non-200 reload response")
+		}
+	})
+
+	t.Run("wrong acknowledged version is an error", func(t *testing.T) {
+		wrong := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]string{"model_version": "v1.2"})
+		}))
+		defer wrong.Close()
+		if err := notifyReload(wrong.URL, "v1.3"); err == nil {
+			t.Error("want error when reload acknowledges the wrong model")
 		}
 	})
 
 	t.Run("api down is an error", func(t *testing.T) {
 		down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		down.Close()
-		if err := notifyReload(down.URL); err == nil {
+		if err := notifyReload(down.URL, "v1.3"); err == nil {
 			t.Error("want error when the API is unreachable")
 		}
 	})
+}
+
+func TestPromoteRequiresExplicitOfflineOverride(t *testing.T) {
+	modelsDir := t.TempDir()
+	writeMinimalModel(t, filepath.Join(modelsDir, "challenger"), "v1.0")
+
+	if _, err := promoteAndActivate(modelsDir, "", false); err == nil {
+		t.Fatal("promotion without an API URL or offline override should fail")
+	}
+	if _, err := os.Stat(filepath.Join(modelsDir, "versions", "v1.0")); !os.IsNotExist(err) {
+		t.Fatalf("failed preflight must not publish artifacts, stat err=%v", err)
+	}
+
+	version, err := promoteAndActivate(modelsDir, "", true)
+	if err != nil {
+		t.Fatalf("explicit offline promotion failed: %v", err)
+	}
+	if version != "v1.0" {
+		t.Errorf("version = %q, want v1.0", version)
+	}
+}
+
+func TestPromotionRollsBackFailedActivationAndRetries(t *testing.T) {
+	modelsDir := t.TempDir()
+	writeMinimalModel(t, filepath.Join(modelsDir, "versions", "v1.2"), "v1.2")
+	if err := os.Symlink(
+		filepath.Join("versions", "v1.2"),
+		filepath.Join(modelsDir, "champion"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeMinimalModel(t, filepath.Join(modelsDir, "challenger"), "v1.3")
+
+	failNew := true
+	var acknowledged []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m, err := model.Load(filepath.Join(modelsDir, "champion", "model.json"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		acknowledged = append(acknowledged, m.Version)
+		if failNew && m.Version == "v1.3" {
+			http.Error(w, "activation refused", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"model_version": m.Version})
+	}))
+	defer srv.Close()
+
+	if _, err := promoteAndActivate(modelsDir, srv.URL, false); err == nil {
+		t.Fatal("failed activation should fail promotion")
+	}
+	if got := championVersion(t, modelsDir); got != "v1.2" {
+		t.Fatalf("champion after rollback = %q, want v1.2", got)
+	}
+	wantFirst := []string{"v1.2", "v1.3", "v1.2"}
+	if !equalStrings(acknowledged, wantFirst) {
+		t.Fatalf("activation sequence = %v, want %v", acknowledged, wantFirst)
+	}
+
+	// The immutable v1.3 publication remains safe to reuse. A retry with
+	// the same bytes can activate it after the serving issue is fixed.
+	failNew = false
+	acknowledged = nil
+	version, err := promoteAndActivate(modelsDir, srv.URL, false)
+	if err != nil {
+		t.Fatalf("idempotent retry failed: %v", err)
+	}
+	if version != "v1.3" || championVersion(t, modelsDir) != "v1.3" {
+		t.Fatalf("retry version=%q champion=%q", version, championVersion(t, modelsDir))
+	}
+	wantRetry := []string{"v1.2", "v1.3"}
+	if !equalStrings(acknowledged, wantRetry) {
+		t.Fatalf("retry sequence = %v, want %v", acknowledged, wantRetry)
+	}
+}
+
+func championVersion(t *testing.T, modelsDir string) string {
+	t.Helper()
+	m, err := model.Load(filepath.Join(modelsDir, "champion", "model.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m.Version
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPromoteAtomicSwapOverSymlink(t *testing.T) {

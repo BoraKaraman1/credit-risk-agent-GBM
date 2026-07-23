@@ -185,18 +185,20 @@ python pipeline/train.py
 # 5. Export the challenger for the Go runtime
 python pipeline/export_model_json.py
 
-# 6. Review the challenger's model card, then promote — the ONLY door
+# 6. (Optional) Replace the challenger with the reject-inference model
+python pipeline/reject_inference.py
+
+# 7. Sync the final challenger's versioned features before promotion
+./go/bin/gbm sync --model challenger
+
+# 8. Review the challenger's model card, then promote — the ONLY door
 #    to champion/. The public LendingClub data carries structural
 #    disparities, so the first (bootstrap) champion is REVIEW REQUIRED
 #    and needs the audited override; once a champion exists, later
 #    challengers are judged champion-relative and can be APPROVED.
-ALLOW_UNAPPROVED_MODEL=true ./go/bin/gbm promote
-
-# 7. Sync features to Supabase (Go)
-./go/bin/gbm sync
-
-# 8. (Optional) Run reject inference
-python pipeline/reject_inference.py
+#    Bootstrap while the API is stopped. Later online promotions require
+#    SCORING_API_URL and roll back if the API cannot activate the version.
+ALLOW_UNAPPROVED_MODEL=true ./go/bin/gbm promote --offline
 ```
 
 ## Scoring API
@@ -316,8 +318,8 @@ These are `gbm` subcommands that print a JSON report to stdout and log results t
 # Retrain orchestrator — train challenger (via Python), compare, recommend
 ./go/bin/gbm retrain manual
 
-# Promote challenger — publish as an immutable versioned dir and
-# atomically repoint the champion symlink (no no-champion window)
+# Promote challenger online. SCORING_API_URL is required; the registry
+# and API roll back to the prior champion if exact-version reload fails.
 ./go/bin/gbm promote
 ```
 
@@ -368,16 +370,21 @@ Two DAGs automate the pipeline end-to-end:
 Runs the full medallion pipeline with optional reject inference:
 
 ```
-bronze_ingest → silver_transform → gold_features → train_challenger → export_model_json → sync_to_supabase
-                                                  ↘ fairness_analysis  ↘ decide_reject_inference → [reject_inference | skip]
+bronze_ingest → silver_transform → gold_features → train_challenger → export_model_json
+                                                  ↘ fairness_analysis  ↘ decide_reject_inference
+                                                                         ↓
+                                                        [reject_inference | skip]
+                                                                         ↓
+                                                        finalize_challenger → sync_to_supabase
 ```
 
 Training tasks run in-process (Python) and produce a **gated
 challenger** with its model card; the champion is never written by the
 DAG. Promotion stays a human step (`gbm promote`), which atomically
-publishes the version and tells the API to reload. `export_model_json`
-dumps the challenger for the Go runtime, and `sync_to_supabase` shells
-out to the Go binary.
+publishes the version, verifies the API loaded that exact version, and
+rolls back on activation failure. `export_model_json` dumps the
+challenger for the Go runtime, and `sync_to_supabase` runs only after
+the optional reject-inference branch has finalized the challenger.
 
 Reject inference is disabled by default. Enable via DAG config:
 ```json

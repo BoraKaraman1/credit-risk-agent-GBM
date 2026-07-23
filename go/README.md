@@ -42,10 +42,13 @@ gold-dataset I/O used across both).
   `models/versions/<v>` directory and repoints the `champion` symlink via
   rename — it is the only writer of `models/champion` (the Python
   pipeline always produces challengers and refuses to write through the
-  symlink). When `SCORING_API_URL` is set, promote then POSTs
-  `/reload` so serving picks up the new champion immediately
-  (best-effort: a failed reload is loudly logged, never a failed
-  promotion).
+  symlink). Online promotion requires `SCORING_API_URL`, preflights
+  `/reload`, verifies the API acknowledged the exact new version, and
+  restores both registry and API to the prior champion on failure.
+  `--offline` is an explicit bootstrap override for a stopped API.
+- **Versioned feature contracts.** Feature rows are keyed by applicant
+  and feature version. `gbm sync --model challenger` can stage new rows
+  without replacing the version still used by the champion.
 - **Stable applicant identity.** Feature-store IDs are keyed on the loan
   ID (`LC_<loan_id>`), never on parquet row position, so regenerating the
   Gold test set cannot re-point applicants or corrupt backfilled labels.
@@ -92,9 +95,10 @@ immutable — the exporter refuses to write through the champion symlink.
 
 All binaries read `.env` (`DATABASE_URL`) and expect to run from the
 repository root (or set `CREDIT_RISK_DATA_DIR` / `CREDIT_RISK_MODELS_DIR`).
-`SCORING_API_URL` (optional) is the running API's base URL; when set,
-`gbm promote` POSTs `/reload` after the champion swap, authenticating
-with the first key in `API_KEYS`.
+`SCORING_API_URL` is required for online `gbm promote`. Promotion
+preflights and verifies `/reload`, authenticating with the first key in
+`API_KEYS`, and rolls back on activation failure. Use `gbm promote
+--offline` only for bootstrap while the scoring API is stopped.
 The scoring API requires `API_KEYS` (comma-separated); it refuses to
 start unauthenticated unless `ALLOW_UNAUTHENTICATED_DEV=true` is set for
 local development. `REQUEST_RATE_LIMIT_RPS` /
@@ -116,8 +120,9 @@ PORT=8000 ./go/bin/gbm serve        # POST /score {"applicant_id": "LC_123456"}
 ./go/bin/gbm performance
 ./go/bin/gbm backfill               # mature scoring_log outcomes from Gold labels
 ./go/bin/gbm retrain psi_critical   # reason arg, default "manual"
-./go/bin/gbm promote                # gated on the challenger being APPROVED
-./go/bin/gbm sync
+./go/bin/gbm sync --model challenger # stage versioned rows before promotion
+./go/bin/gbm promote                 # online, transactional activation
+./go/bin/gbm promote --offline       # bootstrap only, API must be stopped
 ./go/bin/gbm prune                  # enforce scoring_log retention
 ```
 

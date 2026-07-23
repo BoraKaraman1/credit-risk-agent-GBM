@@ -5,9 +5,9 @@
 //	gbm drift             drift monitor (PSI/CSI)
 //	gbm performance       performance monitor (AUC/KS/Gini)
 //	gbm retrain [reason]  retrain orchestrator (default reason: manual)
-//	gbm promote           atomically promote challenger to champion
+//	gbm promote [--offline] atomically promote challenger to champion
 //	gbm backfill          mature scoring_log outcomes from Gold labels
-//	gbm sync              bulk feature-store upsert
+//	gbm sync --model <slot> bulk feature-store upsert for champion or challenger
 //	gbm prune             delete scoring_log rows past retention
 package main
 
@@ -29,9 +29,9 @@ commands:
   drift              run the drift monitor (PSI/CSI)
   performance        run the performance monitor (AUC/KS/Gini)
   retrain [reason]   run the retrain orchestrator (default reason: manual)
-  promote            atomically promote the challenger to champion
+  promote [--offline] atomically promote and activate the challenger
   backfill           backfill scoring_log outcomes from Gold labels
-  sync               sync Gold features to the feature store
+  sync --model <slot> sync Gold features for champion or challenger
   prune              delete scoring_log rows older than the retention window
 `)
 }
@@ -55,11 +55,21 @@ func main() {
 		}
 		monitoring.RunRetrain(reason)
 	case "promote":
-		monitoring.RunPromote()
+		offline, err := promoteOfflineArg(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		monitoring.RunPromote(offline)
 	case "backfill":
 		monitoring.RunBackfill()
 	case "sync":
-		monitoring.RunSync()
+		slot, err := syncModelArg(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		monitoring.RunSync(slot)
 	case "prune":
 		monitoring.RunPrune()
 	default:
@@ -67,4 +77,23 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func promoteOfflineArg(args []string) (bool, error) {
+	switch {
+	case len(args) == 0:
+		return false, nil
+	case len(args) == 1 && args[0] == "--offline":
+		return true, nil
+	default:
+		return false, fmt.Errorf("usage: gbm promote [--offline]")
+	}
+}
+
+func syncModelArg(args []string) (string, error) {
+	if len(args) != 2 || args[0] != "--model" ||
+		(args[1] != "champion" && args[1] != "challenger") {
+		return "", fmt.Errorf("usage: gbm sync --model <champion|challenger>")
+	}
+	return args[1], nil
 }

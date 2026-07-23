@@ -1,7 +1,7 @@
 // Supabase Sync (Go port of pipeline/sync_to_supabase.py).
-// Bulk-upserts Gold test-set features into the applicant_features
-// feature store and stores the training score distribution used as
-// the PSI reference.
+// Bulk-upserts Gold test-set features into the versioned
+// applicant_features store and saves the selected model's training
+// score distribution.
 package monitoring
 
 import (
@@ -23,23 +23,81 @@ import (
 
 const batchSize = 10000
 
-func syncFeatures(ctx context.Context, d *db.DB) error {
+type featureMetadata struct {
+	FeatureColumns []string `json:"feature_columns"`
+	FeatureVersion int      `json:"feature_version"`
+}
+
+func loadFeatureMetadata() (*featureMetadata, error) {
 	metaBytes, err := os.ReadFile(filepath.Join(config.GoldDir(), "feature_metadata.json"))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var meta struct {
-		FeatureColumns []string `json:"feature_columns"`
-		FeatureVersion int      `json:"feature_version"`
-	}
+	var meta featureMetadata
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
-		return err
+		return nil, err
 	}
+	if meta.FeatureVersion == 0 {
+		meta.FeatureVersion = 1 // legacy metadata without the field
+	}
+	return &meta, nil
+}
+
+func syncModelPath(slot string) (string, error) {
+	switch slot {
+	case "champion":
+		return config.ChampionModelPath(), nil
+	case "challenger":
+		return config.ChallengerModelPath(), nil
+	default:
+		return "", fmt.Errorf("invalid sync model %q; expected champion or challenger", slot)
+	}
+}
+
+func validateSyncContract(m *model.Model, meta *featureMetadata) error {
+	modelFeatureVersion := m.FeatureVersion
+	if modelFeatureVersion == 0 {
+		modelFeatureVersion = 1
+	}
+	if modelFeatureVersion != meta.FeatureVersion {
+		return fmt.Errorf(
+			"Gold feature version %d does not match model %s feature version %d",
+			meta.FeatureVersion, m.Version, modelFeatureVersion,
+		)
+	}
+	if !sameFeatures(meta.FeatureColumns, m.Features) {
+		return fmt.Errorf("Gold feature columns do not match model %s", m.Version)
+	}
+	return nil
+}
+
+func loadSyncTarget(slot string) (*model.Model, *featureMetadata, error) {
+	path, err := syncModelPath(slot)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := model.Load(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load %s model: %w", slot, err)
+	}
+	meta, err := loadFeatureMetadata()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateSyncContract(m, meta); err != nil {
+		return nil, nil, err
+	}
+	return m, meta, nil
+}
+
+func syncFeatures(
+	ctx context.Context,
+	d *db.DB,
+	m *model.Model,
+	meta *featureMetadata,
+) error {
 	featureCols := meta.FeatureColumns
 	featureVersion := meta.FeatureVersion
-	if featureVersion == 0 {
-		featureVersion = 1 // legacy metadata without the field
-	}
 
 	// Test set only — simulates active applicants awaiting scoring
 	// (training data is historical, not needed in the feature store)
@@ -49,7 +107,11 @@ func syncFeatures(ctx context.Context, d *db.DB) error {
 		return err
 	}
 	total := frame.NumRows
-	slog.Info(fmt.Sprintf("Preparing %d rows (test set) for bulk upsert ...", total))
+	slog.Info("preparing feature rows for bulk upsert",
+		"rows", total,
+		"model_version", m.Version,
+		"feature_version", featureVersion,
+	)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	synced := 0
@@ -105,13 +167,7 @@ func syncFeatures(ctx context.Context, d *db.DB) error {
 	return nil
 }
 
-func syncTrainingDistribution(ctx context.Context, d *db.DB) error {
-	m, err := model.Load(config.ChampionModelPath())
-	if err != nil {
-		slog.Info("no champion model found, skipping distribution sync", "detail", err)
-		return nil
-	}
-
+func syncTrainingDistribution(ctx context.Context, d *db.DB, m *model.Model) error {
 	train, err := gold.ReadColumns(filepath.Join(config.GoldDir(), "features_train.parquet"), m.Features)
 	if err != nil {
 		return err
@@ -138,10 +194,16 @@ func round(x float64, decimals int) float64 {
 	return math.Round(x*p) / p
 }
 
-func RunSync() {
+func RunSync(slot string) {
 	config.LoadEnv()
 	ctx, cancel := withDeadline(syncTimeout)
 	defer cancel()
+
+	m, meta, err := loadSyncTarget(slot)
+	if err != nil {
+		slog.Error("sync preflight failed", "model", slot, "error", err)
+		os.Exit(1)
+	}
 
 	d, err := db.Connect(ctx, config.DatabaseURL())
 	if err != nil {
@@ -150,11 +212,11 @@ func RunSync() {
 	}
 	defer d.Close()
 
-	if err := syncFeatures(ctx, d); err != nil {
+	if err := syncFeatures(ctx, d, m, meta); err != nil {
 		slog.Error("feature sync failed", "error", err)
 		os.Exit(1)
 	}
-	if err := syncTrainingDistribution(ctx, d); err != nil {
+	if err := syncTrainingDistribution(ctx, d, m); err != nil {
 		slog.Error("training distribution sync failed", "error", err)
 		os.Exit(1)
 	}

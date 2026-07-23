@@ -102,7 +102,7 @@ def sample_applicant_ids(limit: int = 200) -> list[str]:
     """A stable sample of feature-store applicants for the picker."""
     with _engine().connect() as conn:
         rows = conn.execute(text("""
-            SELECT applicant_id FROM applicant_features
+            SELECT DISTINCT applicant_id FROM applicant_features
             ORDER BY applicant_id
             LIMIT :limit
         """), {"limit": limit}).fetchall()

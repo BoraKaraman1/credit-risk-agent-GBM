@@ -193,7 +193,7 @@ type server struct {
 // scoringStore is the serving boundary over Postgres. Keeping it narrow
 // makes the fail-closed audit behavior testable without a live database.
 type scoringStore interface {
-	FetchApplicantFeatures(context.Context, string) (*db.ApplicantFeatures, error)
+	FetchApplicantFeatures(context.Context, string, int) (*db.ApplicantFeatures, error)
 	InsertScoringLog(context.Context, db.ScoringAudit) error
 	Ping(context.Context) error
 	Close()
@@ -333,9 +333,15 @@ func (s *server) scoreApplicant(ctx context.Context, applicantID string) (*score
 	if err != nil {
 		return nil, err
 	}
-	feat, err := d.FetchApplicantFeatures(ctx, applicantID)
+	feat, err := d.FetchApplicantFeatures(ctx, applicantID, m.FeatureVersion)
 	if errors.Is(err, db.ErrNotFound) {
 		return nil, &httpError{404, fmt.Sprintf("Applicant %s not found in feature store", applicantID)}
+	}
+	if errors.Is(err, db.ErrFeatureVersionNotFound) {
+		return nil, &httpError{409, fmt.Sprintf(
+			"features for %s are unavailable at model feature version %d",
+			applicantID, m.FeatureVersion,
+		)}
 	}
 	if err != nil {
 		logger(ctx).Error("feature fetch failed", "applicant_id", applicantID, "error", err)

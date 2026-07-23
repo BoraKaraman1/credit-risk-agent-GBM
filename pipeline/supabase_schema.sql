@@ -1,16 +1,41 @@
 -- Credit Risk Feature Store — Supabase PostgreSQL Schema
 -- Run this in the Supabase SQL Editor to create all tables.
 
--- Feature store: latest features per applicant (for real-time scoring)
+-- Feature store: immutable-contract snapshots per applicant and version
 CREATE TABLE IF NOT EXISTS applicant_features (
-    applicant_id       TEXT PRIMARY KEY,
+    applicant_id       TEXT NOT NULL,
     feature_version    INT NOT NULL DEFAULT 1,
     computed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     features           JSONB NOT NULL,
     data_completeness  NUMERIC(4,3),
     fico_score         SMALLINT,
-    grade              SMALLINT
+    grade              SMALLINT,
+    PRIMARY KEY (applicant_id, feature_version)
 );
+
+-- Forward migration from the original one-row-per-applicant store. The
+-- existing row keeps its feature_version and becomes the first versioned
+-- snapshot; later challenger syncs can coexist with champion snapshots.
+DO $$
+DECLARE
+    current_pk TEXT;
+    current_pk_columns INT;
+BEGIN
+    SELECT conname, cardinality(conkey)
+      INTO current_pk, current_pk_columns
+      FROM pg_constraint
+     WHERE conrelid = 'applicant_features'::regclass
+       AND contype = 'p';
+
+    IF current_pk IS NOT NULL AND current_pk_columns = 1 THEN
+        EXECUTE format(
+            'ALTER TABLE applicant_features DROP CONSTRAINT %I',
+            current_pk
+        );
+        ALTER TABLE applicant_features
+            ADD PRIMARY KEY (applicant_id, feature_version);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS ix_applicant_features_computed
     ON applicant_features (computed_at DESC);

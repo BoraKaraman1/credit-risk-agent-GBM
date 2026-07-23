@@ -18,6 +18,10 @@ import (
 // feature store.
 var ErrNotFound = errors.New("not found")
 
+// ErrFeatureVersionNotFound distinguishes a missing applicant from an
+// applicant that exists only under a different feature contract.
+var ErrFeatureVersionNotFound = errors.New("feature version not found")
+
 type DB struct {
 	Pool *pgxpool.Pool
 }
@@ -139,19 +143,50 @@ type ApplicantFeatures struct {
 }
 
 // FetchApplicantFeatures returns the stored feature vector for one
-// applicant, or ErrNotFound.
-func (d *DB) FetchApplicantFeatures(ctx context.Context, applicantID string) (*ApplicantFeatures, error) {
+// applicant at the exact model feature version. A zero expected version
+// is the legacy compatibility path and returns the latest stored version.
+func (d *DB) FetchApplicantFeatures(
+	ctx context.Context,
+	applicantID string,
+	expectedFeatureVersion int,
+) (*ApplicantFeatures, error) {
 	var (
 		featuresJSON []byte
 		out          ApplicantFeatures
 	)
-	err := d.Pool.QueryRow(ctx, `
+	query := `
 		SELECT features, data_completeness, fico_score, grade, feature_version, computed_at
 		FROM applicant_features
-		WHERE applicant_id = $1`, applicantID).
+		WHERE applicant_id = $1 AND feature_version = $2`
+	args := []any{applicantID, expectedFeatureVersion}
+	if expectedFeatureVersion == 0 {
+		query = `
+			SELECT features, data_completeness, fico_score, grade, feature_version, computed_at
+			FROM applicant_features
+			WHERE applicant_id = $1
+			ORDER BY feature_version DESC
+			LIMIT 1`
+		args = []any{applicantID}
+	}
+	err := d.Pool.QueryRow(ctx, query, args...).
 		Scan(&featuresJSON, &out.DataCompleteness, &out.FicoScore, &out.Grade,
 			&out.FeatureVersion, &out.ComputedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if expectedFeatureVersion != 0 {
+			var exists bool
+			existsErr := d.Pool.QueryRow(ctx,
+				`SELECT EXISTS (
+					SELECT 1 FROM applicant_features WHERE applicant_id = $1
+				)`,
+				applicantID,
+			).Scan(&exists)
+			if existsErr != nil {
+				return nil, existsErr
+			}
+			if exists {
+				return nil, ErrFeatureVersionNotFound
+			}
+		}
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -310,9 +345,8 @@ func (d *DB) UpsertApplicantFeatures(ctx context.Context, batch []FeatureRow) er
 			(applicant_id, feature_version, computed_at, features, data_completeness, fico_score, grade)
 		SELECT * FROM unnest(
 			$1::text[], $2::int[], $3::timestamptz[], $4::jsonb[], $5::float8[], $6::int[], $7::int[])
-		ON CONFLICT (applicant_id)
+		ON CONFLICT (applicant_id, feature_version)
 		DO UPDATE SET
-			feature_version = EXCLUDED.feature_version,
 			computed_at = EXCLUDED.computed_at,
 			features = EXCLUDED.features,
 			data_completeness = EXCLUDED.data_completeness,

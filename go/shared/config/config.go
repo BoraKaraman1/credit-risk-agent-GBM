@@ -126,9 +126,9 @@ func ChallengerModelPath() string { return filepath.Join(ChallengerDir(), "model
 
 func DatabaseURL() string { return os.Getenv("DATABASE_URL") }
 
-// ScoringAPIURL is the base URL of a running scoring API. When set,
-// `gbm promote` POSTs /reload after a successful promotion so serving
-// picks up the new champion without waiting for a restart.
+// ScoringAPIURL is the base URL of the running scoring API. Online
+// promotion preflights and verifies /reload against this endpoint, and
+// rolls the registry back if activation fails.
 func ScoringAPIURL() string { return os.Getenv("SCORING_API_URL") }
 
 // boolEnv reports whether an environment variable is set to a truthy

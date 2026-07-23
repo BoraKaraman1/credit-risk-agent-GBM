@@ -236,6 +236,9 @@ func runRetrain(ctx context.Context, reason string) (*retrainReport, error) {
 		// the serving runtime never observes a missing or partial champion.
 		PromoteCommand: "gbm promote",
 	}
+	if champion == nil {
+		rep.PromoteCommand = "gbm promote --offline"
+	}
 	rep.Challenger.Version = version
 	rep.Challenger.TestMetrics = challengerMetrics
 	rep.Challenger.Params = trained.Params

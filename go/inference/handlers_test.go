@@ -43,15 +43,17 @@ func syntheticAPIModel() *model.Model {
 }
 
 type fakeScoringStore struct {
-	features *db.ApplicantFeatures
-	fetchErr error
-	auditErr error
-	audits   []db.ScoringAudit
+	features        *db.ApplicantFeatures
+	fetchErr        error
+	auditErr        error
+	audits          []db.ScoringAudit
+	fetchedVersions []int
 }
 
 func (f *fakeScoringStore) FetchApplicantFeatures(
-	context.Context, string,
+	_ context.Context, _ string, featureVersion int,
 ) (*db.ApplicantFeatures, error) {
+	f.fetchedVersions = append(f.fetchedVersions, featureVersion)
 	return f.features, f.fetchErr
 }
 
@@ -304,6 +306,9 @@ func TestScoreApplicantAuditsCompleteEnvelopeBeforeMetrics(t *testing.T) {
 	if len(store.audits) != 1 {
 		t.Fatalf("audit count = %d, want 1", len(store.audits))
 	}
+	if !reflect.DeepEqual(store.fetchedVersions, []int{7}) {
+		t.Fatalf("feature fetch versions = %v, want [7]", store.fetchedVersions)
+	}
 	audit := store.audits[0]
 	if audit.RequestID != "req-123" ||
 		audit.ApplicantID != resp.ApplicantID ||
@@ -337,6 +342,22 @@ func TestScoreApplicantAuditsCompleteEnvelopeBeforeMetrics(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(decisionsTotal.WithLabelValues("decline")) - beforeDecisions; got != 0 {
 		t.Errorf("failed audit recorded %v decisions, want 0", got)
+	}
+}
+
+func TestScoreApplicantReportsUnavailableFeatureVersion(t *testing.T) {
+	m := syntheticAPIModel()
+	m.FeatureVersion = 8
+	store := &fakeScoringStore{fetchErr: db.ErrFeatureVersionNotFound}
+	s := &server{model: m, db: store}
+
+	_, err := s.scoreApplicant(context.Background(), "LC_1")
+	var httpErr *httpError
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusConflict {
+		t.Fatalf("error = %v, want 409 feature-version conflict", err)
+	}
+	if !reflect.DeepEqual(store.fetchedVersions, []int{8}) {
+		t.Fatalf("feature fetch versions = %v, want [8]", store.fetchedVersions)
 	}
 }
 

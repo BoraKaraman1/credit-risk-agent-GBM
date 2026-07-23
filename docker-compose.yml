@@ -92,9 +92,9 @@ services:
       # Used by the gbm tasks (sync, monitors) the DAGs shell out to.
       DATABASE_URL: postgresql://${POSTGRES_USER:-credit_risk}:${POSTGRES_PASSWORD:-credit_risk}@postgres:5432/${POSTGRES_DB:-credit_risk}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      # For `docker compose exec airflow gbm promote`: after the swap,
-      # promote POSTs /reload to the API so serving picks up the new
-      # champion. The key must be one of the api service's API_KEYS.
+      # For `docker compose exec airflow gbm promote`: promotion
+      # preflights /reload, swaps the registry, and verifies the API
+      # activated the exact version. The key must be in API_KEYS.
       SCORING_API_URL: http://api:8000
       API_KEYS: ${API_KEYS:-demo-local-key}
     ports:

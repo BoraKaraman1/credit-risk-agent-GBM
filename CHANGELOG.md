@@ -13,7 +13,7 @@ Governance unification release. An architecture review found the system's centra
 #### Single promotion door (`pipeline/train.py`, `dags/credit_risk_pipeline.py`, `go/monitoring/promote.go`)
 - `train.py` always produces a **challenger** with its model card (`challenger/model_card.md`); the champion is only ever created by `gbm promote`, which copies the reviewed card into the immutable version dir. The monthly DAG trains a challenger and never touches `champion/`.
 - Python registry writers now take the same flock as `gbm retrain`/`gbm promote` (`io_utils.registry_lock()` on `models/.registry.lock`, flock(2)-compatible across languages) and refuse to write through the promoted-champion symlink (`config.assert_mutable_model_dir`).
-- `gbm promote` POSTs `/reload` to `SCORING_API_URL` after the swap (best-effort, loudly logged), so promotion propagates to serving without waiting for a restart.
+- `gbm promote` preflights `/reload`, verifies the exact activated version after the swap, and restores both registry and API to the prior champion on failure. Offline bootstrap now requires the explicit `--offline` flag.
 - Reject inference is sequenced after export in the DAG (both write the challenger slot) and the standalone fairness task skips gracefully until a champion exists.
 
 #### Reject inference repair (`pipeline/reject_inference.py`)

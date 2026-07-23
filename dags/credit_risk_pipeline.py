@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
 from airflow.operators.empty import EmptyOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 # Go binaries live in /opt/airflow/bin inside the Docker image; for a
 # local Airflow run from the repo root they are in go/bin.
@@ -60,7 +61,15 @@ def _run_export_model():
 
 
 def _run_sync():
-    subprocess.run([os.path.join(GO_BIN_DIR, "gbm"), "sync"], check=True)
+    subprocess.run(
+        [
+            os.path.join(GO_BIN_DIR, "gbm"),
+            "sync",
+            "--model",
+            "challenger",
+        ],
+        check=True,
+    )
 
 
 def _run_reject_inference():
@@ -117,12 +126,18 @@ with DAG(
     )
     reject_inf = PythonOperator(task_id="reject_inference", python_callable=_run_reject_inference)
     skip_ri = EmptyOperator(task_id="skip_reject_inference")
+    finalize_challenger = EmptyOperator(
+        task_id="finalize_challenger",
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    )
 
-    # Linear pipeline: Bronze → Silver → Gold → Train → Export → Sync + Fairness
-    bronze >> silver >> gold >> train >> export >> sync
+    # Linear pipeline through export; sync waits until the optional reject
+    # inference branch has selected the deterministic final challenger.
+    bronze >> silver >> gold >> train >> export
     train >> fairness
 
     # Optional reject inference branch AFTER export: both write the
     # challenger slot, so sequencing makes the RI model (when enabled)
     # the deterministic final challenger of the run.
     export >> decide_ri >> [reject_inf, skip_ri]
+    [reject_inf, skip_ri] >> finalize_challenger >> sync
